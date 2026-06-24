@@ -1,0 +1,74 @@
+preset:
+  kind: standard
+  purpose: quantitative
+
+dataset:
+  name: 20newsgroup
+  train_csv: data/20newsgroup/train.csv
+  test_csv: data/20newsgroup/test.csv
+  categories:
+    computer:
+      [
+        comp.graphics,
+        comp.os.ms-windows.misc,
+        comp.sys.ibm.pc.hardware,
+        comp.sys.mac.hardware,
+        comp.windows.x,
+      ]
+    ride: [rec.autos, rec.motorcycles]
+    sports: [rec.sport.baseball, rec.sport.hockey]
+    science: [sci.crypt, sci.electronics, sci.med, sci.space]
+    religion: [alt.atheism, soc.religion.christian, talk.religion.misc]
+    politics: [talk.politics.guns, talk.politics.mideast, talk.politics.misc]
+
+train:
+  num_topics: 20
+  num_iterations: 10
+  kappa_default: 10.0
+  num_components: 1
+  gibbs_sweeps: 20
+  num_samples: 8
+
+encoder:
+  model_name: sentence-transformers/all-minilm-l6-v2
+  device: cuda
+
+runtime:
+  seed_base: 42
+  num_workers: 1
+
+vmf:
+  inference:
+    soft_temperature: 1.0
+
+experiments:
+  iterations: [0, 1, 2, 3, 4]
+
+evaluation:
+  tasks: [classification]
+  classifiers: [svm]
+
+baselines:
+  - name: Contextual TM
+    runner: ctm
+  - name: Blei LDA
+    runner: bleilda
+  - name: Gaussian LDA
+    runner: gaussianlda
+    params:
+      word2vec: glove-wiki-gigaword-100
+  - name: ETM
+    runner: etm
+    params:
+      word2vec: glove-wiki-gigaword-100
+  - name: MvTM
+    runner: mvtm
+    params:
+      word2vec: glove-wiki-gigaword-100
+      num_components: 1
+  - name: Sentence LDA
+    runner: sentence_gaussianlda
+  - name: sentLDA
+    runner: sentlda
+
+output_root: results/experiments
