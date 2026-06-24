@@ -1,7 +1,7 @@
 # Spherical Topic Models with Sentence Embeddings
 
 [![python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/koba-r/spherical-sentence-topics/actions/workflows/ci.yml/badge.svg)](https://github.com/koba-r/spherical-sentence-topics/actions/workflows/ci.yml)
+[![CI](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml/badge.svg)](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![packaging: poetry](https://img.shields.io/badge/packaging-poetry-60A5FA.svg)](https://python-poetry.org/)
 

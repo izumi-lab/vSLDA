@@ -35,7 +35,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/koba-r/spherical-sentence-topics"
+Repository = "https://github.com/izumi-lab/vSLDA"
 
 
 [build-system]
