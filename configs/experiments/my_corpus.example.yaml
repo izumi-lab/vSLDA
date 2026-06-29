@@ -1,0 +1,37 @@
+dataset:
+  name: my_corpus
+  train_csv: data/my_corpus/train.csv
+  test_csv: data/my_corpus/test.csv
+  categories:
+    all: null
+
+preprocess:
+  language: ja
+  text_column: data
+  target_column: null
+  has_labels: false
+  segmenter: delimiter
+  delimiter: " / "
+  tokenizer: default
+
+train:
+  num_topics: 10
+  num_iterations: 10
+  kappa_default: 10.0
+  num_components: 1
+  gibbs_sweeps: 20
+  num_samples: 8
+
+encoder:
+  model_name: sentence-transformers/all-minilm-l6-v2
+  device: cpu
+
+experiments:
+  iterations: [0]
+
+runtime:
+  seed_base: 42
+  num_workers: 1
+
+baselines: []
+output_root: results/experiments

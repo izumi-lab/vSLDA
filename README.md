@@ -20,14 +20,15 @@ Gaussian LDA (GLDA) and Gaussian Sentence LDA (GSLDA).
 ## At a Glance
 
 - Implements vMF Sentence LDA for sentence-level topic modeling
-- Compares against topic-model baselines
+- Supports comparisons with topic-model baselines
 - Provides CLI workflows for dataset preparation, experiments, and evaluation
 - Persists reproducible artifacts under `results/`
 - Main example dataset: 20 Newsgroups
+- Runs custom CSV datasets from local YAML configs
 
 The workflow is intentionally artifact-based:
 
-1. prepare datasets into canonical train/test CSV files
+1. prepare datasets as canonical train/test CSV files
 2. run configured model comparisons and persist artifacts
 3. evaluate saved outputs with explicit downstream tasks
 
@@ -40,7 +41,7 @@ For the full command guide, see [`docs/user_guide.md`](docs/user_guide.md).
 
 ## Installation
 
-Install development and ML dependencies for the quick start, then install the
+Install development and ML dependencies for the Quick Start, then install the
 NLTK WordNet corpus. WordNet is used for English lemmatization in some
 baselines and vocabulary-based workflows:
 
@@ -106,6 +107,47 @@ This writes `data/nyt/train.csv` and `data/nyt/test.csv` with the same
 20 Newsgroups preparation path. See [`docs/preprocessing.md`](docs/preprocessing.md)
 for the shared preprocessing policy.
 
+#### Use Your Own CSV Dataset
+
+You can also skip the built-in preparation commands and place a local dataset
+under `data/`:
+
+- `data/my_corpus/train.csv`
+- `data/my_corpus/test.csv`
+
+Each row is one document, and the example config below expects the text column
+to be named `data`. For sentence-level topic modeling, store sentences joined
+with `" / "`:
+
+```csv
+data
+"First sentence. / Second sentence."
+"Another document. / More text."
+```
+
+If you start from raw prose, call `src.data.segmentation.segment_text` from a
+local preprocessing script and write the joined text to `data`.
+
+Use the committed example config
+[`configs/experiments/my_corpus.example.yaml`](configs/experiments/my_corpus.example.yaml)
+as a starting point. It is configured for an unsupervised `my_corpus` run with
+MinILM embeddings on CPU.
+
+For English text, use `language: english` in the config and
+`segment_text(..., language="en")` in preprocessing.
+
+Run vMF Sentence LDA on the full corpus:
+
+```bash
+poetry run spherical-sentence-topics experiments run \
+  --config configs/experiments/my_corpus.example.yaml
+```
+
+Artifacts are written under `results/experiments/my_corpus/`.
+
+If you prefer to store unsegmented prose in `data`, set
+`preprocess.segmenter: pysbd` and `preprocess.delimiter: null`.
+
 ### 2. Choose an Encoder Device
 
 On CPU-only machines, copy the preset to a local config such as
@@ -118,7 +160,7 @@ encoder:
 
 ### 3. Run Experiments
 
-Run vMF Sentence LDA from the example preset:
+Run vMF Sentence LDA from the 20 Newsgroups example preset:
 
 ```bash
 poetry run spherical-sentence-topics experiments run \
@@ -196,6 +238,9 @@ Main generated roots:
 - `results/experiments/`
 - `results/baselines/`
 - `results/classification/`
+- `results/topic_analysis/`
+- `results/topic_count_analysis/`
+- `results/visualization/`
 
 For the complete output contract, see [`docs/artifacts.md`](docs/artifacts.md).
 
