@@ -6,8 +6,13 @@ from typing import Sequence
 
 import numpy as np
 
+from src.baselines.artifact_alignment import (
+    require_selected_corpus,
+    validate_no_additional_document_drop,
+    validate_selected_artifact_alignment,
+)
 from src.baselines.contracts import BaselineArtifacts
-from src.baselines.dataset_adapters import load_preprocessed_documents
+from src.baselines.dataset_adapters import load_preprocessed_documents_with_indices
 from src.baselines.models.senclu_internal import SenClu
 from src.baselines.params import SenCluParams
 from src.core.artifacts import (
@@ -67,7 +72,7 @@ def train_senclu(
     use_legacy: bool,
 ) -> SenCluTrainResult:
     _ = train_dir
-    train_preprocessed = load_preprocessed_documents(
+    train_preprocessed, train_raw_indices = load_preprocessed_documents_with_indices(
         csv_paths=train_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -81,7 +86,7 @@ def train_senclu(
         ja_dicdir=ja_dicdir,
         ja_require_unidic=ja_require_unidic,
     )
-    test_preprocessed = load_preprocessed_documents(
+    test_preprocessed, test_raw_indices = load_preprocessed_documents_with_indices(
         csv_paths=test_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -95,8 +100,14 @@ def train_senclu(
         ja_dicdir=ja_dicdir,
         ja_require_unidic=ja_require_unidic,
     )
-    train_selection = select_modelable_documents(train_preprocessed)
-    test_selection = select_modelable_documents(test_preprocessed)
+    train_selection = select_modelable_documents(
+        train_preprocessed,
+        raw_doc_indices=train_raw_indices,
+    )
+    test_selection = select_modelable_documents(
+        test_preprocessed,
+        raw_doc_indices=test_raw_indices,
+    )
     train_preprocessed = train_selection.documents
     test_preprocessed = test_selection.documents
     use_usif = (
@@ -121,6 +132,18 @@ def train_senclu(
         test_corpus = [
             doc.sentences_raw for doc in test_preprocessed if doc.sentences_raw
         ]
+    validate_no_additional_document_drop(
+        model_name="SenClu",
+        split="train",
+        selected_count=len(train_selection.documents),
+        model_input_count=len(train_corpus),
+    )
+    validate_no_additional_document_drop(
+        model_name="SenClu",
+        split="infer",
+        selected_count=len(test_selection.documents),
+        model_input_count=len(test_corpus),
+    )
 
     trainer = SenClu(
         device=encoder_device,
@@ -186,6 +209,32 @@ def persist_senclu_run(
     infer_dir: Path,
     category: str,
 ) -> BaselineArtifacts:
+    train_selection = require_selected_corpus(
+        train_result.train_selection,
+        model_name="SenClu",
+        split="train",
+    )
+    test_selection = require_selected_corpus(
+        infer_result.test_selection,
+        model_name="SenClu",
+        split="infer",
+    )
+    validate_selected_artifact_alignment(
+        model_name="SenClu",
+        split="train",
+        doc_topic=train_result.train_doc_topic,
+        preprocessed=train_result.train_preprocessed,
+        selection=train_selection,
+        sentence_topic_soft=train_result.train_sentence_topic_soft,
+    )
+    validate_selected_artifact_alignment(
+        model_name="SenClu",
+        split="infer",
+        doc_topic=infer_result.test_doc_topic,
+        preprocessed=infer_result.test_preprocessed,
+        selection=test_selection,
+        sentence_topic_soft=infer_result.test_sentence_topic_soft,
+    )
     pickle_specs = [
         PickleArtifactSpec(
             name="train_path",
@@ -232,12 +281,6 @@ def persist_senclu_run(
         pickle_specs,
         train_dir=train_dir,
         infer_dir=infer_dir,
-    )
-    train_selection = train_result.train_selection or select_modelable_documents(
-        train_result.train_preprocessed
-    )
-    test_selection = infer_result.test_selection or select_modelable_documents(
-        infer_result.test_preprocessed
     )
     selection_saved = save_split_jsons(
         {

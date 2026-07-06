@@ -7,8 +7,13 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from src.baselines.artifact_alignment import (
+    require_selected_corpus,
+    validate_no_additional_document_drop,
+    validate_selected_artifact_alignment,
+)
 from src.baselines.contracts import BaselineArtifacts
-from src.baselines.dataset_adapters import load_preprocessed_documents
+from src.baselines.dataset_adapters import load_preprocessed_documents_with_indices
 from src.baselines.params import CtmParams
 from src.core.artifacts import (
     PREPROCESSING_SELECTION_FILENAME,
@@ -69,7 +74,7 @@ class CtmInferResult:
     test_selection: SelectedCorpus | None = None
 
 
-def _load_preprocessed_documents(
+def _load_preprocessed_documents_with_source_indices(
     *,
     csv_paths: Sequence[str],
     text_column: str,
@@ -83,8 +88,8 @@ def _load_preprocessed_documents(
     ja_stopwords_path: str | None,
     ja_dicdir: str | None,
     ja_require_unidic: bool,
-) -> list[PreprocessedDocument]:
-    return load_preprocessed_documents(
+) -> tuple[list[PreprocessedDocument], list[int]]:
+    return load_preprocessed_documents_with_indices(
         csv_paths=csv_paths,
         text_column=text_column,
         target_column=target_column,
@@ -166,7 +171,10 @@ def train_ctm(
     encoder_device: str = "auto",
 ) -> CtmTrainResult:
     ctm_cls, topic_preparation_cls = _load_ctm_dependencies()
-    train_preprocessed = _load_preprocessed_documents(
+    (
+        train_preprocessed,
+        train_raw_indices,
+    ) = _load_preprocessed_documents_with_source_indices(
         csv_paths=train_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -181,11 +189,20 @@ def train_ctm(
         ja_require_unidic=ja_require_unidic,
     )
     _ = use_legacy
-    train_selection = select_modelable_documents(train_preprocessed)
+    train_selection = select_modelable_documents(
+        train_preprocessed,
+        raw_doc_indices=train_raw_indices,
+    )
     train_preprocessed = train_selection.documents
     usable_docs = [
         doc for doc in train_preprocessed if doc.document_tokens and doc.contextual_text
     ]
+    validate_no_additional_document_drop(
+        model_name="CTM",
+        split="train",
+        selected_count=len(train_selection.documents),
+        model_input_count=len(usable_docs),
+    )
     preproc_docs = [doc.lexical_text for doc in usable_docs]
     unpreproc_docs = _apply_contextual_prefix(
         [doc.contextual_text for doc in usable_docs],
@@ -258,7 +275,10 @@ def infer_ctm(
     params: CtmParams,
     use_legacy: bool,
 ) -> CtmInferResult:
-    test_preprocessed = _load_preprocessed_documents(
+    (
+        test_preprocessed,
+        test_raw_indices,
+    ) = _load_preprocessed_documents_with_source_indices(
         csv_paths=test_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -273,11 +293,20 @@ def infer_ctm(
         ja_require_unidic=ja_require_unidic,
     )
     _ = use_legacy
-    test_selection = select_modelable_documents(test_preprocessed)
+    test_selection = select_modelable_documents(
+        test_preprocessed,
+        raw_doc_indices=test_raw_indices,
+    )
     test_preprocessed = test_selection.documents
     usable_docs = [
         doc for doc in test_preprocessed if doc.document_tokens and doc.contextual_text
     ]
+    validate_no_additional_document_drop(
+        model_name="CTM",
+        split="infer",
+        selected_count=len(test_selection.documents),
+        model_input_count=len(usable_docs),
+    )
     preproc_docs = [doc.lexical_text for doc in usable_docs]
     unpreproc_docs = _apply_contextual_prefix(
         [doc.contextual_text for doc in usable_docs],
@@ -323,6 +352,30 @@ def persist_ctm_run(
     infer_dir: Path,
     category: str,
 ) -> BaselineArtifacts:
+    train_selection = require_selected_corpus(
+        train_result.train_selection,
+        model_name="CTM",
+        split="train",
+    )
+    test_selection = require_selected_corpus(
+        infer_result.test_selection,
+        model_name="CTM",
+        split="infer",
+    )
+    validate_selected_artifact_alignment(
+        model_name="CTM",
+        split="train",
+        doc_topic=train_result.train_doc_topic,
+        preprocessed=train_result.train_preprocessed,
+        selection=train_selection,
+    )
+    validate_selected_artifact_alignment(
+        model_name="CTM",
+        split="infer",
+        doc_topic=infer_result.test_doc_topic,
+        preprocessed=infer_result.test_preprocessed,
+        selection=test_selection,
+    )
     train_dir.mkdir(parents=True, exist_ok=True)
     infer_dir.mkdir(parents=True, exist_ok=True)
     train_result.model.save(models_dir=train_dir)
@@ -361,12 +414,6 @@ def persist_ctm_run(
         ],
         train_dir=train_dir,
         infer_dir=infer_dir,
-    )
-    train_selection = train_result.train_selection or select_modelable_documents(
-        train_result.train_preprocessed
-    )
-    test_selection = infer_result.test_selection or select_modelable_documents(
-        infer_result.test_preprocessed
     )
     selection_saved = save_split_jsons(
         {

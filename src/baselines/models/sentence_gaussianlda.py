@@ -6,8 +6,12 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from src.baselines.artifact_alignment import (
+    require_selected_corpus,
+    validate_selected_artifact_alignment,
+)
 from src.baselines.contracts import BaselineArtifacts
-from src.baselines.dataset_adapters import load_preprocessed_documents
+from src.baselines.dataset_adapters import load_preprocessed_documents_with_indices
 from src.baselines.models.gaussian_persistence import persist_gaussian_family_run
 from src.baselines.models.gaussian_state import (
     GaussianTrainerState,
@@ -149,7 +153,7 @@ def train_sentence_gaussianlda(
         truncate_dim=params.truncate_dim,
         strip_terminal_normalize=params.strip_terminal_normalize,
     )
-    train_preprocessed = load_preprocessed_documents(
+    train_preprocessed, train_raw_indices = load_preprocessed_documents_with_indices(
         csv_paths=train_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -163,7 +167,10 @@ def train_sentence_gaussianlda(
         ja_dicdir=ja_dicdir,
         ja_require_unidic=ja_require_unidic,
     )
-    train_selection = select_modelable_documents(train_preprocessed)
+    train_selection = select_modelable_documents(
+        train_preprocessed,
+        raw_doc_indices=train_raw_indices,
+    )
     train_preprocessed = train_selection.documents
     fit_encoder_on_sentences(encoder, train_preprocessed)
     corpus = sentence_corpus_for_encoder(train_preprocessed, encoder)
@@ -225,7 +232,7 @@ def infer_sentence_gaussianlda(
     params: SentenceGaussianLdaParams,
     use_legacy: bool,
 ) -> SentenceGaussianLdaInferResult:
-    test_preprocessed = load_preprocessed_documents(
+    test_preprocessed, test_raw_indices = load_preprocessed_documents_with_indices(
         csv_paths=test_csvs,
         text_column=text_column,
         target_column=target_column,
@@ -239,7 +246,10 @@ def infer_sentence_gaussianlda(
         ja_dicdir=ja_dicdir,
         ja_require_unidic=ja_require_unidic,
     )
-    test_selection = select_modelable_documents(test_preprocessed)
+    test_selection = select_modelable_documents(
+        test_preprocessed,
+        raw_doc_indices=test_raw_indices,
+    )
     test_preprocessed = test_selection.documents
     corpus = sentence_corpus_for_encoder(test_preprocessed, train_result.model.encoder)
     output = np.zeros((len(corpus), num_topics), dtype=float)
@@ -286,6 +296,32 @@ def persist_sentence_gaussianlda_run(
     infer_dir: Path,
     category: str,
 ) -> BaselineArtifacts:
+    train_selection = require_selected_corpus(
+        train_result.train_selection,
+        model_name="SentenceGaussianLDA",
+        split="train",
+    )
+    test_selection = require_selected_corpus(
+        infer_result.test_selection,
+        model_name="SentenceGaussianLDA",
+        split="infer",
+    )
+    validate_selected_artifact_alignment(
+        model_name="SentenceGaussianLDA",
+        split="train",
+        doc_topic=train_result.train_doc_topic,
+        preprocessed=train_result.train_preprocessed,
+        selection=train_selection,
+        sentence_topic_soft=train_result.train_sentence_topic_soft,
+    )
+    validate_selected_artifact_alignment(
+        model_name="SentenceGaussianLDA",
+        split="infer",
+        doc_topic=infer_result.test_doc_topic,
+        preprocessed=infer_result.test_preprocessed,
+        selection=test_selection,
+        sentence_topic_soft=infer_result.test_sentence_topic_soft,
+    )
     artifacts = persist_gaussian_family_run(
         trainer=train_result.trainer_state,
         train_doc_topic=train_result.train_doc_topic,
@@ -333,12 +369,6 @@ def persist_sentence_gaussianlda_run(
             "train_preprocessed",
             "infer_preprocessed",
         ],
-    )
-    train_selection = train_result.train_selection or select_modelable_documents(
-        train_result.train_preprocessed
-    )
-    test_selection = infer_result.test_selection or select_modelable_documents(
-        infer_result.test_preprocessed
     )
     selection_saved = save_split_jsons(
         {

@@ -125,8 +125,8 @@ def test_ctm_uses_shared_preprocessed_text_even_when_legacy_enabled(
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "src.baselines.models.ctm._load_preprocessed_documents",
-        lambda **_kwargs: docs,
+        "src.baselines.models.ctm._load_preprocessed_documents_with_source_indices",
+        lambda **_kwargs: (docs, [3]),
     )
 
     class DummyTopicPreparation:
@@ -213,8 +213,8 @@ def test_ctm_custom_embeddings_keep_contextual_model_for_inference(
     ]
 
     monkeypatch.setattr(
-        "src.baselines.models.ctm._load_preprocessed_documents",
-        lambda **_kwargs: docs,
+        "src.baselines.models.ctm._load_preprocessed_documents_with_source_indices",
+        lambda **_kwargs: (docs, [5]),
     )
 
     class DummyEncoder:
