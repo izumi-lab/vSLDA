@@ -30,6 +30,7 @@ def run_classification_suite(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> None:
     run_classification_evaluation(
         iterations=iterations,
@@ -47,6 +48,7 @@ def run_classification_suite(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     )
 
 
@@ -70,6 +72,7 @@ def run_limited_classification_suite(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     sampling_repeats: Sequence[int] | None = None,
     sampling_seed_stride: int = 1000,
     sampling_max_attempts: int = DEFAULT_SAMPLING_MAX_ATTEMPTS,
@@ -94,6 +97,7 @@ def run_limited_classification_suite(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         sampling_repeats=sampling_repeats,
         sampling_seed_stride=sampling_seed_stride,
         sampling_max_attempts=sampling_max_attempts,
@@ -118,6 +122,7 @@ def write_classification_summary(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
     output_path: Path | None = None,
@@ -138,6 +143,7 @@ def write_classification_summary(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         excluded_categories=excluded_categories,
         include_all_category=include_all_category,
         output_path=output_path,

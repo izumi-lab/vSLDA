@@ -27,6 +27,10 @@ def build_gaussian_params_payload(
         "num_tables": trainer_state.num_tables,
         "kappa": trainer_state.prior_kappa,
     }
+    if trainer_state.prior_scale is not None:
+        payload["prior_scale"] = trainer_state.prior_scale
+    if trainer_state.prior_nu is not None:
+        payload["prior_nu"] = trainer_state.prior_nu
     if trainer_state.table_density_kernel_backend is not None:
         payload["table_density_kernel_backend"] = (
             trainer_state.table_density_kernel_backend

@@ -5,6 +5,7 @@ from typing import Literal
 
 import numpy as np
 
+from src.baselines.params import format_prior_scale_variant
 from src.core.artifacts import (
     METADATA_FILENAME,
     load_artifact_json,
@@ -43,6 +44,11 @@ MODEL_CHOICES = [
     "vmf",
     "sentlda",
     "sentence_gaussianlda",
+    "bleilda",
+    "mvtm",
+    "gaussianlda",
+    "etm",
+    "ctm",
 ]
 ANALYSIS_ROOT = RESULTS_ROOT / "topic_analysis"
 DEFAULT_OUT_ROOT = ANALYSIS_ROOT / "coherence"
@@ -50,6 +56,7 @@ DEFAULT_EMBEDDING_VARIANT = "mpnet"
 EMBEDDING_VARIANT_MODELS = {
     "vmf",
     "sentence_gaussianlda",
+    "ctm",
 }
 
 
@@ -102,6 +109,7 @@ def build_baseline_param_dir(
     category: str,
     data_run: str = "default",
     embedding_variant: str | None = None,
+    prior_scale: float | None = None,
 ) -> Path:
     if model not in {
         "bleilda",
@@ -128,6 +136,12 @@ def build_baseline_param_dir(
             category=category,
             data_run=data_run,
             embedding_variant=effective_embedding_variant(model, embedding_variant),
+            parameter_variant=(
+                format_prior_scale_variant(prior_scale)
+                if prior_scale is not None
+                and model in {"gaussianlda", "sentence_gaussianlda"}
+                else None
+            ),
         )
         / "params"
     )
@@ -142,6 +156,7 @@ def resolve_model_provenance(
     category: str,
     data_run: str = "default",
     embedding_variant: str | None = None,
+    prior_scale: float | None = None,
 ) -> dict[str, object]:
     if model == "vmf":
         return load_model_provenance(
@@ -165,6 +180,7 @@ def resolve_model_provenance(
             category=category,
             data_run=data_run,
             embedding_variant=embedding_variant,
+            prior_scale=prior_scale,
         ),
         model_key=model,
     )
@@ -187,6 +203,7 @@ def _load_result_metadata(
     num_topics: int,
     category: str,
     embedding_variant: str | None = None,
+    prior_scale: float | None = None,
 ) -> dict[str, object]:
     if model == "vmf":
         result_dir = build_result_dir(
@@ -208,6 +225,7 @@ def _load_result_metadata(
                 category,
                 data_run=data_run,
                 embedding_variant=embedding_variant,
+                prior_scale=prior_scale,
             )
         except MissingArtifactError:
             return {}
@@ -228,6 +246,7 @@ def resolve_split_csvs_and_target_column(
     category: str,
     split: str,
     embedding_variant: str | None = None,
+    prior_scale: float | None = None,
 ) -> tuple[tuple[str, ...] | None, str]:
     payload = _load_result_metadata(
         model=model,
@@ -237,6 +256,7 @@ def resolve_split_csvs_and_target_column(
         num_topics=num_topics,
         category=category,
         embedding_variant=embedding_variant,
+        prior_scale=prior_scale,
     )
     key = "train_csvs" if split == "train" else "test_csvs"
     raw_paths = payload.get(key)

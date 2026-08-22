@@ -8,8 +8,10 @@ from src.baselines.contracts import BaselineArtifacts, BaselineRunRequest
 from src.baselines.dataset_adapters import use_legacy_category_behavior
 from src.baselines.model_kinds import baseline_method_kind
 from src.baselines.params import (
+    DEFAULT_PRETRAINED_WORD2VEC,
     baseline_params_to_options,
     baseline_params_to_variant,
+    format_prior_scale_variant,
     normalize_baseline_params,
 )
 from src.core.artifacts import (
@@ -53,7 +55,10 @@ GAUSSIAN_TERMINAL_NORMALIZE_RUNNERS = {
     "gaussian_mixture",
 }
 
+GAUSSIAN_PRIOR_SCALE_RUNNERS = {"gaussianlda", "sentence_gaussianlda"}
+
 _GLOVE_RE = re.compile(r"^glove-wiki-gigaword-(?P<dim>\d+)$")
+_GOOGLE_NEWS_RE = re.compile(r"^word2vec-google-news-(?P<dim>\d+)$")
 _VECTOR_DIM_RE = re.compile(r"(?P<dim>\d+)d(?:\D|$)")
 
 
@@ -75,6 +80,9 @@ def _word_embedding_alias(word2vec: object) -> str:
     glove_match = _GLOVE_RE.match(normalized)
     if glove_match is not None:
         return f"glove{glove_match.group('dim')}"
+    google_news_match = _GOOGLE_NEWS_RE.match(normalized)
+    if google_news_match is not None:
+        return f"googlenews{google_news_match.group('dim')}"
     if normalized.startswith("wikientvec"):
         dim_match = _VECTOR_DIM_RE.search(normalized)
         if dim_match is not None:
@@ -95,7 +103,7 @@ def _baseline_encoder_config(
     runner_key = str(runner).strip().lower()
     if runner_key in WORD_EMBEDDING_AWARE_RUNNERS:
         normalized = baseline_params_to_options(baseline_params)
-        word2vec = normalized.get("word2vec", "glove-wiki-gigaword-100")
+        word2vec = normalized.get("word2vec", DEFAULT_PRETRAINED_WORD2VEC)
         return {
             "embedding_type": "word_vectors",
             "word2vec": str(word2vec),
@@ -153,6 +161,18 @@ def _baseline_embedding_variant(
     return variant
 
 
+def _baseline_parameter_variant(
+    *,
+    runner: str,
+    baseline_params: object,
+) -> str | None:
+    runner_key = str(runner).strip().lower()
+    if runner_key not in GAUSSIAN_PRIOR_SCALE_RUNNERS:
+        return None
+    normalized = baseline_params_to_options(baseline_params)
+    return format_prior_scale_variant(float(normalized.get("prior_scale", 0.1)))
+
+
 def _baseline_dir(
     model: str,
     *,
@@ -178,8 +198,15 @@ def _baseline_archive_root(
     request: BaselineRunRequest,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
+    condition_fingerprint: str | None = None,
 ) -> Path:
     options = dict(request.options)
+    del condition_fingerprint  # Compatibility with the pre-variant helper API.
+    if parameter_variant is None and model in GAUSSIAN_PRIOR_SCALE_RUNNERS:
+        parameter_variant = format_prior_scale_variant(
+            float(options.get("prior_scale", 0.1))
+        )
     return build_baseline_archive_dir(
         model=model,
         dataset=request.dataset,
@@ -189,6 +216,7 @@ def _baseline_archive_root(
         num_topics=request.num_topics,
         num_components=num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         started_at=(
             None
             if options.get("started_at") is None
@@ -299,6 +327,10 @@ def _save_runner_metadata(
         runner=request.name,
         baseline_params=baseline_params,
     )
+    parameter_variant = _baseline_parameter_variant(
+        runner=request.name,
+        baseline_params=baseline_params,
+    ) or baseline_params_to_variant(baseline_params)
     metadata = BaselineArtifactMetadata(
         runner_key=request.name,
         runner_family=runner_family,
@@ -316,7 +348,7 @@ def _save_runner_metadata(
             if options.get("execution_id") is None
             else str(options.get("execution_id"))
         ),
-        parameter_variant=baseline_params_to_variant(baseline_params),
+        parameter_variant=parameter_variant,
         preprocessing_variant=_build_preprocessing_variant(options),
         dataset=request.dataset,
         category=request.category,
@@ -399,6 +431,7 @@ def _write_baseline_pointer(
     artifacts: Mapping[str, Path],
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     encoder_config: Mapping[str, Any] | None = None,
 ) -> Path:
     options = dict(request.options)
@@ -428,6 +461,7 @@ def _write_baseline_pointer(
         condition_fingerprint=condition_fingerprint,
         artifacts=serialized_artifacts,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         encoder_config=encoder_config,
     )
 
@@ -457,6 +491,10 @@ def _build_baseline_identity(
         runner=request.name,
         baseline_params=baseline_params,
     )
+    parameter_variant = _baseline_parameter_variant(
+        runner=request.name,
+        baseline_params=baseline_params,
+    ) or baseline_params_to_variant(baseline_params)
     payload: dict[str, Any] = {
         "model": model,
         "runner_key": request.name,
@@ -465,7 +503,7 @@ def _build_baseline_identity(
         "iteration": int(request.iteration),
         "num_topics": int(request.num_topics),
         "category": request.category,
-        "parameter_variant": baseline_params_to_variant(baseline_params),
+        "parameter_variant": parameter_variant,
         "baseline_params": baseline_params_to_options(baseline_params),
         "preprocessing_variant": _build_preprocessing_variant(options),
         "train_csvs": [str(path) for path in options.get("train_csvs", []) or []],
@@ -548,6 +586,10 @@ def execute_adapter(
         runner=request.name,
         baseline_params=params,
     )
+    parameter_variant = _baseline_parameter_variant(
+        runner=request.name,
+        baseline_params=params,
+    )
     use_legacy = _resolve_legacy_preprocessing(dataset=request.dataset, options=options)
     display_num_components = _display_num_components_for_request(
         model=spec.model,
@@ -562,6 +604,7 @@ def execute_adapter(
         request=request,
         num_components=display_num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
     )
     train_dir = condition_root / "params"
     infer_dir = condition_root / "infer"
@@ -636,6 +679,7 @@ def execute_adapter(
         artifacts=artifacts.as_dict(),
         num_components=display_num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         encoder_config=encoder_config,
     )
     return artifacts

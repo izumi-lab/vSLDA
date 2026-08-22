@@ -12,11 +12,7 @@ from .reference_counts import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Analyze topic-word metrics for vmf, sentlda, and "
-            "sentence_gaussianlda. These models use proxy NPMI "
-            "(sentence-topic or document-topic mode)."
-        )
+        description="Analyze provenance-aware topic-word metrics for fitted models."
     )
     parser.add_argument("--model", nargs="+", choices=MODEL_CHOICES, required=True)
     parser.add_argument("--dataset", required=True)
@@ -30,6 +26,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_EMBEDDING_VARIANT,
     )
+    parser.add_argument("--prior-scale", type=float, default=None)
     parser.add_argument(
         "--out_root", type=Path, default=Path("results/topic_analysis/coherence")
     )
@@ -44,27 +41,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coherence_min_window_count", type=int, default=None)
     parser.add_argument("--diversity_topn", type=int, default=25)
     parser.add_argument(
-        "--gaussian_word2vec", type=str, default="glove-wiki-gigaword-100"
+        "--topic-word-score-mode",
+        choices=["word_topic_npmi", "topic_word_probability"],
+        default="word_topic_npmi",
+        help=("Representative-word ranking consumed by both coherence and diversity."),
+    )
+    parser.add_argument(
+        "--gaussian_word2vec", type=str, default="word2vec-google-news-300"
     )
     parser.add_argument("--coherence_split", choices=["train", "test"], default="train")
     parser.add_argument("--coherence_min_token_len", type=int, default=2)
     parser.add_argument("--dict_no_below", type=int, default=3)
     parser.add_argument("--dict_no_above", type=float, default=0.7)
+    parser.add_argument(
+        "--dict_exclude_tokens",
+        "--dict-exclude-tokens",
+        type=lambda value: frozenset(
+            token.strip() for token in value.split(",") if token.strip()
+        ),
+        default=frozenset(),
+        help="Comma-separated exact tokens to exclude from evaluation dictionaries.",
+    )
     parser.add_argument("--dict_exclude_single_alpha", action="store_true")
     parser.add_argument("--dict_exclude_with_digit", action="store_true")
     parser.add_argument("--dict_exclude_hiragana_only", action="store_true")
+    parser.add_argument("--posterior-num-chains", type=int, default=1)
+    parser.add_argument("--posterior-burn-in-sweeps", type=int, default=20)
+    parser.add_argument("--posterior-retained-samples", type=int, default=20)
+    parser.add_argument("--posterior-thinning", type=int, default=1)
+    parser.add_argument("--posterior-seed", type=int, default=0)
     parser.add_argument(
-        "--proxy_npmi_mode", choices=["sentence", "document"], default="sentence"
+        "--posterior-backend", choices=["python", "numba"], default="numba"
     )
-    parser.add_argument(
-        "--proxy_word_score_mode",
-        choices=["npmi", "word_npmi"],
-        default="word_npmi",
-    )
+    parser.add_argument("--etm-theta-samples", type=int, default=100)
+    parser.add_argument("--etm-posterior-seed", type=int, default=0)
+    parser.add_argument("--npmi-min-expected-count", type=float, default=None)
     parser.add_argument(
         "--coherence_reference",
         choices=["dataset", "wikipedia"],
-        default="dataset",
+        default="wikipedia",
     )
     parser.add_argument("--coherence_reference_path", type=Path, default=None)
     parser.add_argument(
@@ -78,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--coherence_count_backend",
         "--coherence-count-backend",
-        choices=["python", "numba"],
+        choices=["python", "numba", "numba_interval"],
         default="numba",
     )
     parser.add_argument(
@@ -94,10 +109,29 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_REFERENCE_COUNT_CHUNK_SIZE,
     )
     parser.add_argument(
+        "--reference-count-max-pending",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         "--coherence_topic_word_workers",
         "--coherence-topic-word-workers",
         type=int,
         default=1,
+    )
+    parser.add_argument(
+        "--topic-word-encoder-device",
+        default="auto",
+        help="Encoder device for vMF/GSLDA topic words: auto, cpu, cuda, or cuda:N.",
+    )
+    parser.add_argument(
+        "--topic-word-encode-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "Optional override for the fitted encoder batch size. When omitted, "
+            "use the saved training value or its stable backend default."
+        ),
     )
     parser.add_argument(
         "--coherence_score_workers",
@@ -106,6 +140,33 @@ def parse_args() -> argparse.Namespace:
         default=1,
     )
     parser.add_argument("--skip_existing", "--skip-existing", action="store_true")
+    parser.add_argument(
+        "--checkpoint-mode",
+        choices=["auto", "off", "refresh"],
+        default="auto",
+    )
+    parser.add_argument("--checkpoint-root", type=Path, default=None)
+    parser.add_argument(
+        "--reference-count-cache-mode",
+        choices=["auto", "off", "refresh"],
+        default="auto",
+    )
+    parser.add_argument(
+        "--reference-index-mode",
+        choices=["off", "auto", "build", "refresh"],
+        default="off",
+    )
+    parser.add_argument("--reference-index-root", type=Path, default=None)
+    parser.add_argument(
+        "--condition-failure-policy",
+        choices=[
+            "fail-fast",
+            "exclude-condition",
+            "isolate",
+            "continue-and-fail",
+        ],
+        default="exclude-condition",
+    )
     parser.add_argument("--language", type=str, default="english")
     parser.add_argument("--delimiter", type=str, default=" / ")
     parser.add_argument("--ja_replace_num", action="store_true")

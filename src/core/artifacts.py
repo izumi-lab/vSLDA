@@ -62,6 +62,7 @@ class VmfArtifactMetadata:
     test_csvs: tuple[str, ...]
     fiscal_years: tuple[int, ...] | None
     num_components: int = 1
+    max_kappa: float | None = None
     encoder_config: dict[str, Any] | None = None
 
 
@@ -184,6 +185,7 @@ def build_latest_result_pointer(
     condition_fingerprint: str | None,
     artifacts: Mapping[str, str],
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     encoder_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -199,6 +201,7 @@ def build_latest_result_pointer(
         "execution_id": execution_id,
         "condition_fingerprint": condition_fingerprint,
         "embedding_variant": embedding_variant,
+        "parameter_variant": parameter_variant,
         "encoder_config": None if encoder_config is None else dict(encoder_config),
         "artifacts": {str(name): str(path) for name, path in sorted(artifacts.items())},
     }

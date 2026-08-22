@@ -16,11 +16,14 @@ class Wishart:
         kappa: float = 0.1,
         scale_sigma: float | None = None,
     ) -> None:
-        del scale_sigma
+        scale = 0.1 if scale_sigma is None else float(scale_sigma)
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("Wishart scale_sigma must be finite and > 0.")
         self.kappa = kappa
         self.mu = np.asarray(mu, dtype=np.float64)
         self.nu = embedding_size
-        self.sigma = np.eye(embedding_size, dtype=np.float64) * 0.1
+        self.scale_sigma = scale
+        self.sigma = np.eye(embedding_size, dtype=np.float64) * scale
         self.chol_sigma = cholesky(self.sigma)
 
     @classmethod

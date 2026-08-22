@@ -7,6 +7,7 @@ from typing import Callable
 import pytest
 
 from src.baselines.adapter_runtime import (
+    _baseline_archive_root,
     _baseline_embedding_variant,
     _build_baseline_identity,
     _word_embedding_alias,
@@ -186,12 +187,15 @@ _RUNNER_FIXTURES: list[_RunnerFixture] = [
             "gaussianlda",
             "latest",
             "all",
-            "k5_it1_glove100",
+            "k5_it1_glove100_psi0-0p1",
         ),
         train_kwargs_to_assert={"num_topics": 5},
         infer_kwargs_to_assert={"num_topics": 5},
         request_options_extra={"word2vec": "glove-wiki-gigaword-100"},
-        pointer_payload_to_assert={"embedding_variant": "glove100"},
+        pointer_payload_to_assert={
+            "embedding_variant": "glove100",
+            "parameter_variant": "psi0-0p1",
+        },
     ),
     _RunnerFixture(
         name="mvtm",
@@ -235,11 +239,12 @@ _RUNNER_FIXTURES: list[_RunnerFixture] = [
             "sentence_gaussianlda",
             "latest",
             "all",
-            "k5_it1",
+            "k5_it1_psi0-0p1",
         ),
         train_kwargs_to_assert={"encoder_device": "cpu"},
         request_options_extra={"encoder_device": "cpu"},
         absent_infer_kwargs=("encoder_device",),
+        pointer_payload_to_assert={"parameter_variant": "psi0-0p1"},
     ),
     _RunnerFixture(
         name="sentlda",
@@ -567,6 +572,7 @@ def test_gaussian_embedding_variant_marks_terminal_normalize_mode() -> None:
 
 
 def test_word_embedding_aliases_use_short_model_labels() -> None:
+    assert _word_embedding_alias("word2vec-google-news-300") == "googlenews300"
     assert _word_embedding_alias("glove-wiki-gigaword-100") == "glove100"
     assert _word_embedding_alias("glove-wiki-gigaword-50") == "glove50"
     assert (
@@ -710,6 +716,91 @@ def test_gaussian_identity_changes_with_terminal_normalize_setting() -> None:
     )
 
     assert stripped != kept
+
+
+@pytest.mark.parametrize("runner", ["gaussianlda", "sentence_gaussianlda"])
+def test_gaussian_family_identity_changes_with_prior_scale(runner: str) -> None:
+    base_options = {
+        "train_csvs": ["train.csv"],
+        "test_csvs": ["test.csv"],
+        "language": "english",
+        "text_column": "data",
+        "target_column": "target_str",
+    }
+    scale_point_one, _ = _build_baseline_identity(
+        model=runner,
+        request=BaselineRunRequest(
+            name=runner,
+            category="all",
+            dataset="dummy",
+            num_topics=5,
+            iteration=1,
+            options={**base_options, "prior_scale": 0.1},
+        ),
+    )
+    scale_three, _ = _build_baseline_identity(
+        model=runner,
+        request=BaselineRunRequest(
+            name=runner,
+            category="all",
+            dataset="dummy",
+            num_topics=5,
+            iteration=1,
+            options={**base_options, "prior_scale": 3.0},
+        ),
+    )
+
+    assert scale_point_one != scale_three
+
+
+@pytest.mark.parametrize("runner", ["gaussianlda", "sentence_gaussianlda"])
+def test_gaussian_family_prior_scale_uses_separate_archive_dirs(runner: str) -> None:
+    base_options = {
+        "train_csvs": ["train.csv"],
+        "test_csvs": ["test.csv"],
+        "language": "english",
+        "started_at": "2026-08-22T00:00:00+00:00",
+        "execution_id": "baseline_20260822T000000Z",
+    }
+    request_point_one = BaselineRunRequest(
+        name=runner,
+        category="all",
+        dataset="dummy",
+        num_topics=5,
+        iteration=1,
+        options={**base_options, "prior_scale": 0.1},
+    )
+    request_three = BaselineRunRequest(
+        name=runner,
+        category="all",
+        dataset="dummy",
+        num_topics=5,
+        iteration=1,
+        options={**base_options, "prior_scale": 3.0},
+    )
+    _, fingerprint_point_one = _build_baseline_identity(
+        model=runner,
+        request=request_point_one,
+    )
+    _, fingerprint_three = _build_baseline_identity(
+        model=runner,
+        request=request_three,
+    )
+
+    archive_point_one = _baseline_archive_root(
+        runner,
+        request=request_point_one,
+        condition_fingerprint=fingerprint_point_one,
+    )
+    archive_three = _baseline_archive_root(
+        runner,
+        request=request_three,
+        condition_fingerprint=fingerprint_three,
+    )
+
+    assert archive_point_one != archive_three
+    assert archive_point_one.parent.name.endswith("_psi0-0p1")
+    assert archive_three.parent.name.endswith("_psi0-3")
 
 
 @pytest.mark.parametrize("fixture", _RUNNER_FIXTURES, ids=lambda f: f.name)
@@ -944,10 +1035,10 @@ def test_run_etm_passes_device_and_effective_random_state(
         / "etm"
         / "latest"
         / "all"
-        / "k5_it1_glove100"
+        / "k5_it1_googlenews300"
         / "CURRENT.json"
     )
     assert pointer_path.exists()
     pointer = load_json(pointer_path)
-    assert pointer["embedding_variant"] == "glove100"
+    assert pointer["embedding_variant"] == "googlenews300"
     assert pointer["encoder_config"]["embedding_type"] == "word_vectors"

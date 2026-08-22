@@ -72,6 +72,7 @@ class GaussianLDATrainer:
         cholesky_decomp=True,
         num_words_for_formatting=None,
         preencode_corpus=True,
+        prior_scale=0.1,
     ):
         """
         :param corpus:
@@ -199,7 +200,12 @@ class GaussianLDATrainer:
             mu = np.mean(doc_means, axis=0)
         else:
             mu = np.zeros(self.embedding_size, dtype=np.float64)
-        self.prior = Wishart(mu, self.embedding_size, kappa=kappa)
+        self.prior = Wishart(
+            mu,
+            self.embedding_size,
+            kappa=kappa,
+            scale_sigma=prior_scale,
+        )
         self.training_corpus_encoding_sec = time.perf_counter() - encode_start
         self.training_corpus_preencoded = bool(self.preencode_corpus)
 

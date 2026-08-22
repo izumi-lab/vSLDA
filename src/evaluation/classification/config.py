@@ -39,7 +39,7 @@ MODEL_NAMES = [
 
 MODEL_TABLE_LABELS = {
     "Blei LDA": "LDA",
-    "sentLDA": "SLDA",
+    "sentLDA": "SentLDA",
     "Gaussian k-means": "GCLU",
     "Spherical k-means": "SCLU",
     "Gaussian mixture": "MGCLU",
@@ -47,7 +47,7 @@ MODEL_TABLE_LABELS = {
     "Gaussian LDA": "GLDA",
     "MvTM": "vLDA",
     "ETM": "ETM",
-    "Contextual TM": "CTM",
+    "Contextual TM": "ConTM",
     "SenClu": "SenClu",
     "BERTopic (UMAP + k-means)": "BERTopic",
     "Sentence LDA": "GSLDA",

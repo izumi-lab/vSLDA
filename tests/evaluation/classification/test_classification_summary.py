@@ -294,8 +294,8 @@ def test_write_summary_uses_short_model_labels(
 
     output = capsys.readouterr().out
     assert (
-        "Category & LDA & SLDA & GCLU & SCLU & MGCLU & MSCLU & GLDA & "
-        "vLDA & ETM & CTM & SenClu & BERTopic & GSLDA & vSLDA"
+        "Category & LDA & SentLDA & GCLU & SCLU & MGCLU & MSCLU & GLDA & "
+        "vLDA & ETM & ConTM & SenClu & BERTopic & GSLDA & vSLDA"
     ) in output
 
 

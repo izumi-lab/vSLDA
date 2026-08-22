@@ -56,6 +56,7 @@ def _aggregate(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
+    prior_scale: float | None = None,
 ) -> tuple[
     Dict[str, Dict[str, List[float]]],
     dict[str, Any],
@@ -80,6 +81,7 @@ def _aggregate(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
+            prior_scale=prior_scale,
         )
         for file_path in file_paths:
             if not file_path.exists():
@@ -121,6 +123,7 @@ def _matches_metric_meta(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
+    prior_scale: float | None = None,
 ) -> bool:
     if not meta:
         return False
@@ -162,6 +165,17 @@ def _matches_metric_meta(
         feature_resolve_mode
     ):
         return False
+    if prior_scale is not None:
+        # The key is always written, and is null for runs made without
+        # --prior-scale. Those predate the flag and used the 0.1 default, so the
+        # fallback has to cover an explicit null, not just a missing key.
+        recorded = meta.get("prior_scale")
+        try:
+            resolved = 0.1 if recorded is None else float(recorded)
+        except (TypeError, ValueError):
+            return False
+        if resolved != float(prior_scale):
+            return False
     return True
 
 
@@ -226,6 +240,7 @@ def _resolve_metric_path_from_latest(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
+    prior_scale: float | None = None,
 ) -> Path | None:
     latest_root = build_classification_latest_dir(
         result_root=result_root,
@@ -264,6 +279,7 @@ def _resolve_metric_path_from_latest(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
+            prior_scale=prior_scale,
         ):
             matches.append((candidate, meta))
     if not matches:
@@ -290,6 +306,7 @@ def _resolve_metric_paths_from_latest(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
+    prior_scale: float | None = None,
 ) -> list[Path]:
     latest_root = build_classification_latest_dir(
         result_root=result_root,
@@ -328,6 +345,7 @@ def _resolve_metric_paths_from_latest(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
+            prior_scale=prior_scale,
         ):
             matches.append((candidate, meta))
     if not matches:
@@ -357,6 +375,7 @@ def _resolve_metric_path(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> Path:
     filename = _metric_filename(metric, dataset, topics)
     latest_candidate = _resolve_metric_path_from_latest(
@@ -373,6 +392,7 @@ def _resolve_metric_path(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     )
     if latest_candidate is not None:
         return latest_candidate
@@ -388,6 +408,7 @@ def _resolve_metric_path(
             label_schema="identity",
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
+            prior_scale=prior_scale,
         )
         candidate = (
             build_classification_output_dir_from_condition(
@@ -428,6 +449,7 @@ def _resolve_metric_path(
                 embedding_variants=embedding_variants,
                 feature_resolve_mode=feature_resolve_mode,
                 selected_models=selected_models,
+                prior_scale=prior_scale,
             ):
                 matches.append((candidate, meta))
         selected_match = _select_metric_match(
@@ -457,6 +479,7 @@ def _resolve_metric_paths(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
+    prior_scale: float | None = None,
 ) -> list[Path]:
     filename = _metric_filename(metric, dataset, topics)
     latest_candidates = _resolve_metric_paths_from_latest(
@@ -473,6 +496,7 @@ def _resolve_metric_paths(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     )
     if latest_candidates:
         return latest_candidates
@@ -491,6 +515,7 @@ def _resolve_metric_paths(
                 resolve_mode=resolve_mode,
                 embedding_variants=embedding_variants,
                 feature_resolve_mode=feature_resolve_mode,
+                prior_scale=prior_scale,
             )
         ]
 
@@ -521,6 +546,7 @@ def _resolve_metric_paths(
                 embedding_variants=embedding_variants,
                 feature_resolve_mode=feature_resolve_mode,
                 selected_models=selected_models,
+                prior_scale=prior_scale,
             ):
                 matches.append((candidate, meta))
         if matches:
@@ -591,7 +617,7 @@ def _latex_escape_text(value: Any) -> str:
 
 MODEL_TABLE_LABELS = {
     "Blei LDA": "LDA",
-    "sentLDA": "SLDA",
+    "sentLDA": "SentLDA",
     "Gaussian k-means": "GCLU",
     "Spherical k-means": "SCLU",
     "Gaussian mixture": "MGCLU",
@@ -599,7 +625,7 @@ MODEL_TABLE_LABELS = {
     "Gaussian LDA": "GLDA",
     "MvTM": "vLDA",
     "ETM": "ETM",
-    "Contextual TM": "CTM",
+    "Contextual TM": "ConTM",
     "SenClu": "SenClu",
     "BERTopic (UMAP + k-means)": "BERTopic",
     "Sentence LDA": "GSLDA",
@@ -608,6 +634,7 @@ MODEL_TABLE_LABELS = {
 
 MODEL_SELECTOR_ALIASES = {
     "BERTopic (UMAP + k-means)": ["bertopic_kmeans", "bertopic"],
+    "Contextual TM": ["ctm"],
     "Sentence LDA": ["sentence_gaussianlda", "gslda"],
 }
 
@@ -914,6 +941,7 @@ def build_summary_report(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
 ) -> dict[str, Any]:
@@ -932,6 +960,7 @@ def build_summary_report(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     )
     if not results:
         return {}
@@ -1009,6 +1038,7 @@ def build_summary_report(
             selected_models=(
                 None if selected_models is None else list(selected_models)
             ),
+            prior_scale=prior_scale,
             excluded_categories=(
                 None if excluded_categories is None else list(excluded_categories)
             ),
@@ -1054,6 +1084,7 @@ def write_summary(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
     output_path: Path | None = None,
@@ -1074,6 +1105,7 @@ def write_summary(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         excluded_categories=excluded_categories,
         include_all_category=include_all_category,
     )

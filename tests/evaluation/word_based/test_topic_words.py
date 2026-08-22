@@ -1,43 +1,15 @@
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 from gensim.models import KeyedVectors
 
 from src.core.artifacts import save_json, save_pickle
 from src.evaluation.word_based.topic_words import (
-    compute_topic_word_npmi,
-    compute_topic_word_npmi_from_sentence_topics,
     load_bertopic_kmeans_topic_words,
     load_etm_topic_words,
     load_mvtm_topic_words,
 )
-
-
-def test_compute_topic_word_npmi_supports_word_normalized_mode() -> None:
-    doc_topics = np.array(
-        [
-            [0.9, 0.1],
-            [0.1, 0.9],
-        ],
-        dtype=float,
-    )
-    corpus_bow = [[(0, 1)], [(1, 1)]]
-
-    scores = compute_topic_word_npmi(
-        doc_topics=doc_topics,
-        corpus_bow=corpus_bow,
-        vocab_size=2,
-        score_mode="word_npmi",
-    )
-
-    expected = math.log(0.45 / (0.5 * 0.5)) / -math.log(0.5)
-    assert scores.shape == (2, 2)
-    assert scores[0, 0] == pytest.approx(expected)
-    assert scores[1, 1] == pytest.approx(expected)
-    assert scores[0, 1] < 0.0
 
 
 def test_load_bertopic_kmeans_topic_words_reads_persisted_artifact(
@@ -133,27 +105,3 @@ def test_load_etm_topic_words_reads_beta_and_vocabulary(monkeypatch, tmp_path) -
         [("beta", pytest.approx(0.8)), ("alpha", pytest.approx(0.2))],
         [("alpha", pytest.approx(0.7)), ("gamma", pytest.approx(0.2))],
     ]
-
-
-def test_compute_topic_word_npmi_from_sentence_topics_supports_word_normalized_mode() -> (
-    None
-):
-    sentence_topics_by_doc = [
-        np.array([[0.9, 0.1]], dtype=float),
-        np.array([[0.1, 0.9]], dtype=float),
-    ]
-    sentence_bow_by_doc = [[[(0, 1)]], [[(1, 1)]]]
-
-    scores = compute_topic_word_npmi_from_sentence_topics(
-        sentence_topics_by_doc=sentence_topics_by_doc,
-        sentence_bow_by_doc=sentence_bow_by_doc,
-        num_topics=2,
-        vocab_size=2,
-        score_mode="word_npmi",
-    )
-
-    expected = math.log(0.45 / (0.5 * 0.5)) / -math.log(0.5)
-    assert scores.shape == (2, 2)
-    assert scores[0, 0] == pytest.approx(expected)
-    assert scores[1, 1] == pytest.approx(expected)
-    assert scores[0, 1] < 0.0

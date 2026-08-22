@@ -5,6 +5,10 @@ from pathlib import Path
 from src.evaluation.word_based import model_inputs
 
 
+def test_effective_embedding_variant_preserves_ctm_variant() -> None:
+    assert model_inputs.effective_embedding_variant("ctm", "mpnet") == "mpnet"
+
+
 def test_resolve_preprocessed_corpus_path_uses_persisted_split_roots(
     monkeypatch,
     tmp_path: Path,

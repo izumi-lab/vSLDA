@@ -759,6 +759,7 @@ def test_build_vmf_run_options_serializes_execution_context() -> None:
     assert options["encoder_name"] == "dummy-encoder"
     assert options["encoder_encode_batch_size"] == 16
     assert options["soft_temperature"] == 0.7
+    assert options["max_kappa"] == 10_000.0
     assert options["data_run"] == "fy2024"
     assert options["condition_id"] == "cond123"
     assert options["output_dir"] == Path("results/run")
@@ -834,6 +835,7 @@ def test_process_category_impl_writes_vmf_archive_and_latest_pointer(
                 num_iterations=5,
                 alpha=None,
                 kappa_default=1.0,
+                max_kappa=2500.0,
                 gibbs_sweeps=1,
                 num_samples=1,
                 alpha_max_iter=5,
@@ -887,6 +889,7 @@ def test_process_category_impl_writes_vmf_archive_and_latest_pointer(
     assert archive_dir.exists()
     config_payload = load_json(archive_dir / "config.json")
     assert config_payload["model_name"] == "vmf_sentence_lda"
+    assert config_payload["max_kappa"] == 2500.0
     assert config_payload["num_topics"] == 10
     assert config_payload["seed"] == DEFAULT_RANDOM_SEED
     assert (archive_dir / "metadata.json").exists()

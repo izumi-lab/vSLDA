@@ -9,6 +9,8 @@ from src.baselines.models.gaussian_helpers import (
     GaussianLdaScorer,
     load_gaussian_word_vectors,
     load_gaussianlda_model,
+    load_word_vectors,
+    should_use_external_vectors,
 )
 from src.core.artifacts import save_json, save_pickle
 
@@ -48,6 +50,34 @@ def test_load_gaussian_word_vectors_supports_wikientvec_specs(
     )
 
     assert loaded is expected
+
+
+def test_pretrained_model_names_are_external_and_local_is_explicit() -> None:
+    assert should_use_external_vectors("word2vec-google-news-300") is True
+    assert should_use_external_vectors("glove-wiki-gigaword-100") is True
+    assert should_use_external_vectors("local") is False
+    assert should_use_external_vectors("local-word2vec") is False
+
+
+def test_load_word_vectors_uses_gensim_downloader_for_pretrained_name(
+    monkeypatch,
+) -> None:
+    expected = _build_keyed_vectors()
+    captured: list[str] = []
+
+    def _fake_download(name: str) -> KeyedVectors:
+        captured.append(name)
+        return expected
+
+    monkeypatch.setattr(
+        "src.baselines.models.gaussian_helpers.gensim.downloader.load",
+        _fake_download,
+    )
+
+    loaded = load_word_vectors("word2vec-google-news-300")
+
+    assert loaded is expected
+    assert captured == ["word2vec-google-news-300"]
 
 
 def test_load_gaussianlda_model_reads_repo_owned_artifacts(tmp_path: Path) -> None:

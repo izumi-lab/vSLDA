@@ -42,17 +42,20 @@ def _embedding_latest_dirs(
     base_display_key: str,
     embedding_variant: str | None,
 ) -> list[Path]:
-    if embedding_variant:
-        return [exact_dir]
     dirs = [exact_dir]
     parent = exact_dir.parent
-    if parent.exists():
-        prefix = f"{base_display_key}_"
-        dirs.extend(
-            path
-            for path in sorted(parent.iterdir())
-            if path.is_dir() and path.name.startswith(prefix)
-        )
+    if not parent.exists():
+        return dirs
+    # An embedding variant pins the start of the display key, but a parameter
+    # variant (the gaussian prior scale) is appended after it, so an exact-name
+    # match alone would miss `<key>_<embedding>_psi0-*`. Match suffixed siblings
+    # in both cases; genuine ambiguity is reported by the caller.
+    prefix = f"{exact_dir.name}_" if embedding_variant else f"{base_display_key}_"
+    dirs.extend(
+        path
+        for path in sorted(parent.iterdir())
+        if path.is_dir() and path.name.startswith(prefix)
+    )
     return dirs
 
 
@@ -99,7 +102,8 @@ def _archive_from_latest_pointers(
             latest_pointer_dirs[0].parent,
             detail=(
                 "Multiple latest pointers match this request. Specify "
-                "embedding_variant or condition_id to disambiguate. "
+                "embedding_variant, parameter_variant or condition_id to "
+                "disambiguate. "
                 f"Candidates: {candidates}"
             ),
         )
@@ -283,6 +287,7 @@ def build_baseline_doc_topic_path(
     condition_payload: Mapping[str, Any] | None = None,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     baseline_root: Path | None = None,
 ) -> Path | None:
     if split not in {"train", "test"}:
@@ -300,6 +305,7 @@ def build_baseline_doc_topic_path(
                 data_run=data_run,
                 num_components=num_components,
                 embedding_variant=embedding_variant,
+                parameter_variant=parameter_variant,
                 baseline_root=baseline_root,
             )
         except MissingArtifactError as exc:
@@ -338,6 +344,7 @@ def build_baseline_doc_topic_path(
                         condition_id=condition_id,
                         num_components=num_components,
                         embedding_variant=embedding_variant,
+                        parameter_variant=parameter_variant,
                         baseline_root=baseline_root,
                     )
                     return resolved_condition_dir / "params" / "lda_comp.pkl"
@@ -375,6 +382,7 @@ def build_baseline_doc_topic_path(
                     condition_id=condition_id,
                     num_components=num_components,
                     embedding_variant=embedding_variant,
+                    parameter_variant=parameter_variant,
                     baseline_root=baseline_root,
                 )
                 return resolved_condition_dir / "infer" / f"{category}.pkl"
@@ -440,6 +448,7 @@ def build_baseline_doc_topic_path(
                         condition_id=condition_id,
                         num_components=num_components,
                         embedding_variant=embedding_variant,
+                        parameter_variant=parameter_variant,
                         baseline_root=baseline_root,
                     )
                     return resolved_condition_dir / "params" / filename
@@ -478,6 +487,7 @@ def build_baseline_doc_topic_path(
                         condition_id=condition_id,
                         num_components=num_components,
                         embedding_variant=embedding_variant,
+                        parameter_variant=parameter_variant,
                         baseline_root=baseline_root,
                     )
                     / "infer"
@@ -521,6 +531,7 @@ def build_baseline_doc_topic_path(
                     condition_id=condition_id,
                     num_components=num_components,
                     embedding_variant=embedding_variant,
+                    parameter_variant=parameter_variant,
                     baseline_root=baseline_root,
                 )
                 return resolved_condition_dir / split_root / f"{category}.pkl"
@@ -854,6 +865,7 @@ def resolve_baseline_condition_dir(
     condition_id: str | None = None,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     baseline_root: Path | None = None,
 ) -> Path:
     resolved_baseline_root = baseline_root or _current_baseline_results_root()
@@ -874,23 +886,42 @@ def resolve_baseline_condition_dir(
             num_topics=num_topics,
             num_components=display_component_count,
         )
-        latest_pointer_dirs.extend(
-            _embedding_latest_dirs(
-                exact_dir=build_baseline_latest_dir(
-                    model=model,
-                    dataset=dataset,
-                    data_run=data_run,
-                    category=category,
-                    iteration=iteration,
-                    num_topics=num_topics,
-                    num_components=display_component_count,
-                    embedding_variant=embedding_variant,
-                    baseline_root=resolved_baseline_root,
-                ),
-                base_display_key=base_display_key,
-                embedding_variant=embedding_variant,
-            )
+        exact_dir = build_baseline_latest_dir(
+            model=model,
+            dataset=dataset,
+            data_run=data_run,
+            category=category,
+            iteration=iteration,
+            num_topics=num_topics,
+            num_components=display_component_count,
+            embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
+            baseline_root=resolved_baseline_root,
         )
+        if parameter_variant is None:
+            latest_pointer_dirs.extend(
+                _embedding_latest_dirs(
+                    exact_dir=exact_dir,
+                    base_display_key=base_display_key,
+                    embedding_variant=embedding_variant,
+                )
+            )
+        else:
+            latest_pointer_dirs.append(exact_dir)
+            if parameter_variant == "psi0-0p1":
+                latest_pointer_dirs.append(
+                    build_baseline_latest_dir(
+                        model=model,
+                        dataset=dataset,
+                        data_run=data_run,
+                        category=category,
+                        iteration=iteration,
+                        num_topics=num_topics,
+                        num_components=display_component_count,
+                        embedding_variant=embedding_variant,
+                        baseline_root=resolved_baseline_root,
+                    )
+                )
     if condition_id is not None:
         category_first_dir = category_root / condition_id
         if category_first_dir.exists():

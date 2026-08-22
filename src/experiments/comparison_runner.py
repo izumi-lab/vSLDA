@@ -43,6 +43,8 @@ def run_comparison(
     vmf_soft_temp: float | None = None,
     encoder_model: str | None = None,
     strip_terminal_normalize: bool | None = None,
+    prior_scale: float | None = None,
+    word2vec: str | None = None,
     categories: Sequence[str] | None = None,
     num_topics: Sequence[int] | None = None,
     iterations: Sequence[int] | None = None,
@@ -54,6 +56,8 @@ def run_comparison(
         config_path,
         encoder_model=encoder_model,
         strip_terminal_normalize=strip_terminal_normalize,
+        prior_scale=prior_scale,
+        word2vec=word2vec,
     )
     runtime_cfg = getattr(cfg, "runtime", None)
     vmf_cfg = getattr(cfg, "vmf", None)

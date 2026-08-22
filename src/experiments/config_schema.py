@@ -25,6 +25,7 @@ class TrainConfig:
     num_iterations: int
     alpha: float | Sequence[float] | None
     kappa_default: float = 10.0
+    max_kappa: float = 10_000.0
     num_components: int = 1
     gibbs_sweeps: int = 1
     num_samples: int = 1

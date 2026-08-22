@@ -182,6 +182,7 @@ def train_sentence_gaussianlda(
         0.1,
         save_path=None,
         preencode_corpus=params.preencode_corpus,
+        prior_scale=params.prior_scale,
     )
     trainer.sample(params.num_iterations)
     trainer_state = snapshot_gaussian_trainer(trainer, include_prior_mu=True)

@@ -178,6 +178,7 @@ def build_dictionary_and_corpus(
     *,
     dict_no_below: int = 3,
     dict_no_above: float = 0.7,
+    dict_exclude_tokens: frozenset[str] = frozenset(),
     dict_exclude_single_alpha: bool = False,
     dict_exclude_with_digit: bool = False,
     dict_exclude_hiragana_only: bool = False,
@@ -185,7 +186,8 @@ def build_dictionary_and_corpus(
     dictionary = Dictionary(texts)
     dictionary.filter_extremes(no_below=dict_no_below, no_above=dict_no_above)
     if (
-        dict_exclude_single_alpha
+        dict_exclude_tokens
+        or dict_exclude_single_alpha
         or dict_exclude_with_digit
         or dict_exclude_hiragana_only
     ):
@@ -195,7 +197,8 @@ def build_dictionary_and_corpus(
             has_digit = any(ch.isdigit() for ch in token)
             is_hiragana_only = bool(HIRAGANA_ONLY_RE.fullmatch(token))
             if (
-                (dict_exclude_single_alpha and is_single_alpha)
+                (token in dict_exclude_tokens)
+                or (dict_exclude_single_alpha and is_single_alpha)
                 or (dict_exclude_with_digit and has_digit)
                 or (dict_exclude_hiragana_only and is_hiragana_only)
             ):
@@ -321,6 +324,7 @@ def build_reference_corpus_bundle(
     min_doc_tokens: int = 1,
     dict_no_below: int = 3,
     dict_no_above: float = 0.7,
+    dict_exclude_tokens: frozenset[str] = frozenset(),
     dict_exclude_single_alpha: bool = False,
     dict_exclude_with_digit: bool = False,
     dict_exclude_hiragana_only: bool = False,
@@ -368,6 +372,7 @@ def build_reference_corpus_bundle(
         texts,
         dict_no_below=dict_no_below,
         dict_no_above=dict_no_above,
+        dict_exclude_tokens=dict_exclude_tokens,
         dict_exclude_single_alpha=dict_exclude_single_alpha,
         dict_exclude_with_digit=dict_exclude_with_digit,
         dict_exclude_hiragana_only=dict_exclude_hiragana_only,
@@ -394,6 +399,7 @@ def build_corpus_bundle(
     ja_require_unidic: bool = True,
     dict_no_below: int = 3,
     dict_no_above: float = 0.7,
+    dict_exclude_tokens: frozenset[str] = frozenset(),
     dict_exclude_single_alpha: bool = False,
     dict_exclude_with_digit: bool = False,
     dict_exclude_hiragana_only: bool = False,
@@ -422,6 +428,7 @@ def build_corpus_bundle(
         texts,
         dict_no_below=dict_no_below,
         dict_no_above=dict_no_above,
+        dict_exclude_tokens=dict_exclude_tokens,
         dict_exclude_single_alpha=dict_exclude_single_alpha,
         dict_exclude_with_digit=dict_exclude_with_digit,
         dict_exclude_hiragana_only=dict_exclude_hiragana_only,

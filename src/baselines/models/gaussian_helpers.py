@@ -188,9 +188,7 @@ def load_word_vectors(
 def should_use_external_vectors(word2vec: str | KeyedVectors) -> bool:
     if not isinstance(word2vec, str):
         return True
-    if is_wikientvec_spec(word2vec):
-        return True
-    return Path(word2vec).expanduser().exists()
+    return word2vec.strip().lower() not in {"local", "local-word2vec"}
 
 
 def build_local_word2vec(

@@ -316,6 +316,78 @@ def test_iter_available_features_reads_all_matching_latest_baseline_variants(
         }
 
 
+def test_prior_scale_point_one_prefers_new_pointer_over_legacy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    baseline_root = tmp_path / "results" / "baselines"
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", baseline_root)
+    monkeypatch.setattr(
+        "src.core.paths.EXPERIMENT_RESULTS_ROOT", tmp_path / "results" / "experiments"
+    )
+    for display_key, fingerprint, parameter_variant in (
+        ("k2_it0_googlenews300", "legacy", None),
+        ("k2_it0_googlenews300_psi0-0p1", "new", "psi0-0p1"),
+    ):
+        archive_dir = (
+            baseline_root
+            / "dummy"
+            / "default"
+            / "gaussianlda"
+            / "archive"
+            / "2026-01-01"
+            / "science"
+            / display_key
+            / fingerprint
+        )
+        latest_dir = (
+            baseline_root
+            / "dummy"
+            / "default"
+            / "gaussianlda"
+            / "latest"
+            / "science"
+            / display_key
+        )
+        _write_latest_pointer_case(
+            archive_dir=archive_dir,
+            latest_dir=latest_dir,
+            metadata={
+                "runner_key": "gaussianlda",
+                "runner_family": "gaussianlda",
+                "dataset": "dummy",
+                "data_run": "default",
+                "category": "science",
+                "num_topics": 2,
+                "iteration": 0,
+                "condition_fingerprint": fingerprint,
+                "parameter_variant": parameter_variant,
+                "baseline_params": {"prior_scale": 0.1},
+            },
+            artifacts={
+                "train_path": "params/table_counts_per_doc.pkl",
+                "infer_path": "infer/science.pkl",
+            },
+            display_key=display_key,
+            embedding_variant="googlenews300",
+        )
+
+    specs = iter_available_features(
+        dataset="dummy",
+        data_run="default",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        vmf_assignment="hard",
+        selected_models=["gaussianlda"],
+        prior_scale=0.1,
+    )
+    gaussian_specs = [item for item in specs if item[0].model_key == "gaussianlda"]
+
+    assert len(gaussian_specs) == 1
+    assert gaussian_specs[0][0].condition_fingerprint == "new"
+
+
 def test_iter_available_features_filters_latest_embedding_variants(
     tmp_path: Path,
     monkeypatch,
@@ -787,3 +859,68 @@ def test_etm_available_index_resolver_uses_training_vocabulary(
     assert captured["label_schema"] == "identity"
     assert captured["with_vocab"] is True
     assert captured["without_vocab"] is False
+
+
+def test_selection_alignment_reads_baseline_flat_files(tmp_path: Path) -> None:
+    from src.evaluation.classification.feature_registry import (
+        _selection_alignment_from_artifacts,
+    )
+
+    train_dir = tmp_path / "params"
+    infer_dir = tmp_path / "infer"
+    train_dir.mkdir()
+    infer_dir.mkdir()
+    save_json(
+        {"raw_doc_indices": [3, 1, 2]}, train_dir / "preprocessing_selection.json"
+    )
+    save_json({"raw_doc_indices": [9, 8]}, infer_dir / "preprocessing_selection.json")
+
+    result = _selection_alignment_from_artifacts(
+        train_dir / "doc_topic.pkl", infer_dir / "doc_topic.pkl"
+    )
+
+    assert result is not None
+    train_alignment, test_alignment = result
+    assert train_alignment.raw_indices.tolist() == [3, 1, 2]
+    assert test_alignment.raw_indices.tolist() == [9, 8]
+
+
+def test_selection_alignment_reads_vmf_combined_shared_file(tmp_path: Path) -> None:
+    from src.evaluation.classification.feature_registry import (
+        _selection_alignment_from_artifacts,
+    )
+
+    save_json(
+        {
+            "train": {"raw_doc_indices": [0, 2, 1]},
+            "test": {"raw_doc_indices": [5, 4]},
+        },
+        tmp_path / "preprocessing_selection.json",
+    )
+
+    result = _selection_alignment_from_artifacts(
+        tmp_path / "doc_topic_train.pkl", tmp_path / "doc_topic_test.pkl"
+    )
+
+    assert result is not None
+    train_alignment, test_alignment = result
+    assert train_alignment.raw_indices.tolist() == [0, 2, 1]
+    assert test_alignment.raw_indices.tolist() == [5, 4]
+
+
+def test_selection_alignment_reports_missing_raw_doc_indices(tmp_path: Path) -> None:
+    from src.evaluation.classification.feature_registry import (
+        _selection_alignment_from_artifacts,
+    )
+
+    train_dir = tmp_path / "params"
+    infer_dir = tmp_path / "infer"
+    train_dir.mkdir()
+    infer_dir.mkdir()
+    save_json({"dropped_doc_indices": []}, train_dir / "preprocessing_selection.json")
+    save_json({"raw_doc_indices": [1]}, infer_dir / "preprocessing_selection.json")
+
+    with pytest.raises(ValueError, match="Unrecognized preprocessing selection"):
+        _selection_alignment_from_artifacts(
+            train_dir / "doc_topic.pkl", infer_dir / "doc_topic.pkl"
+        )

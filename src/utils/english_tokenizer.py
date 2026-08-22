@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 import unicodedata
 from functools import lru_cache
+from threading import Lock
 
 from nltk.corpus import wordnet
 from nltk.stem import WordNetLemmatizer
 
 _NUM_RE = re.compile(r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$")
 _TOKEN_RE = re.compile(r"[A-Za-z]+|[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?")
+_WORDNET_LOAD_LOCK = Lock()
 _IRREGULAR_VERB_FORMS = frozenset(
     {
         "am",
@@ -88,14 +90,18 @@ def _normalize_text(text: str) -> str:
 
 @lru_cache(maxsize=1)
 def _get_wordnet_lemmatizer() -> WordNetLemmatizer:
-    try:
-        wordnet.ensure_loaded()
-    except LookupError as exc:
-        raise RuntimeError(
-            "NLTK wordnet corpus is required for English lemmatization. "
-            "Install it with: poetry run setup-nltk"
-        ) from exc
-    return WordNetLemmatizer()
+    # NLTK's LazyCorpusLoader mutates itself while loading and is not safe for
+    # concurrent first access. lru_cache can invoke a cache miss more than once
+    # when threads arrive together, so the corpus load itself must be serialized.
+    with _WORDNET_LOAD_LOCK:
+        try:
+            wordnet.ensure_loaded()
+        except LookupError as exc:
+            raise RuntimeError(
+                "NLTK wordnet corpus is required for English lemmatization. "
+                "Install it with: poetry run setup-nltk"
+            ) from exc
+        return WordNetLemmatizer()
 
 
 def _candidate_pos_tags(token: str) -> tuple[str, ...]:

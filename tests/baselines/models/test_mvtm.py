@@ -13,7 +13,11 @@ from src.baselines.models.mvtm import (
     persist_mvtm_run,
     train_mvtm,
 )
-from src.baselines.params import MvTMParams, parse_mvtm_params
+from src.baselines.params import (
+    MvTMParams,
+    baseline_params_to_variant,
+    parse_mvtm_params,
+)
 from src.core.artifacts import load_pickle
 from src.data.preprocessing import PreprocessedDocument
 
@@ -57,16 +61,34 @@ def _docs() -> list[PreprocessedDocument]:
 def test_parse_mvtm_params_defaults_to_single_component() -> None:
     params = parse_mvtm_params({})
 
-    assert params.word2vec == "glove-wiki-gigaword-100"
+    assert params.word2vec == "word2vec-google-news-300"
     assert params.num_iterations == 20
     assert params.num_components == 1
     assert params.alpha is None
     assert params.estimate_alpha is False
+    assert params.max_kappa == 10_000.0
 
 
 def test_parse_mvtm_params_validates_positive_values() -> None:
     with pytest.raises(ValueError, match="num_components"):
         parse_mvtm_params({"num_components": 0})
+    with pytest.raises(ValueError, match="max_kappa"):
+        parse_mvtm_params({"max_kappa": 0})
+    with pytest.raises(ValueError, match="kappa_default must be <= max_kappa"):
+        parse_mvtm_params({"kappa_default": 11, "max_kappa": 10})
+
+
+def test_parse_mvtm_params_accepts_max_kappa_override() -> None:
+    assert parse_mvtm_params({"max_kappa": "2500"}).max_kappa == 2500.0
+
+
+def test_mvtm_parameter_identity_includes_max_kappa() -> None:
+    default_variant = baseline_params_to_variant(parse_mvtm_params({}))
+    bounded_variant = baseline_params_to_variant(parse_mvtm_params({"max_kappa": 2500}))
+
+    assert "max_kappa=10000.0" in default_variant
+    assert "max_kappa=2500.0" in bounded_variant
+    assert default_variant != bounded_variant
 
 
 def test_word_vector_encoder_returns_vectors_for_known_tokens() -> None:

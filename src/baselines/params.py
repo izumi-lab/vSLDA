@@ -1,9 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
+from decimal import Decimal
 from typing import Any, Mapping
 
+import numpy as np
+
 from src.utils.encoder_profiles import resolve_encoder_settings
+
+DEFAULT_PRETRAINED_WORD2VEC = "word2vec-google-news-300"
+
+
+def format_prior_scale_variant(value: float) -> str:
+    scale = float(value)
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError("prior_scale must be finite and > 0.")
+    normalized = format(Decimal(str(scale)).normalize(), "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return f"psi0-{normalized.replace('.', 'p')}"
 
 
 @dataclass(frozen=True)
@@ -53,20 +68,22 @@ class SenCluParams:
 
 @dataclass(frozen=True)
 class GaussianLdaParams:
-    word2vec: str = "glove-wiki-gigaword-100"
+    word2vec: str = DEFAULT_PRETRAINED_WORD2VEC
     wikientvec_cache_dir: str | None = None
     num_iterations: int = 20
+    prior_scale: float = 0.1
 
 
 @dataclass(frozen=True)
 class MvTMParams:
-    word2vec: str = "glove-wiki-gigaword-100"
+    word2vec: str = DEFAULT_PRETRAINED_WORD2VEC
     wikientvec_cache_dir: str | None = None
     num_iterations: int = 20
     num_components: int = 1
     alpha: float | None = None
     estimate_alpha: bool = False
     kappa_default: float = 10.0
+    max_kappa: float = 10_000.0
     gibbs_sweeps: int = 1
     num_samples: int = 1
     alpha_update_every: int = 1
@@ -79,7 +96,7 @@ class MvTMParams:
 
 @dataclass(frozen=True)
 class EtmParams:
-    word2vec: str = "glove-wiki-gigaword-100"
+    word2vec: str = DEFAULT_PRETRAINED_WORD2VEC
     wikientvec_cache_dir: str | None = None
     num_epochs: int = 100
     batch_size: int = 128
@@ -114,6 +131,7 @@ class SentenceGaussianLdaParams:
     encode_batch_size: int = 128
     preencode_corpus: bool = True
     soft_temperature: float = 1.0
+    prior_scale: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -387,21 +405,25 @@ def parse_senclu_params(options: dict[str, Any]) -> SenCluParams:
 
 
 def parse_gaussianlda_params(options: dict[str, Any]) -> GaussianLdaParams:
-    return GaussianLdaParams(
-        word2vec=str(options.get("word2vec", "glove-wiki-gigaword-100")),
+    params = GaussianLdaParams(
+        word2vec=str(options.get("word2vec", DEFAULT_PRETRAINED_WORD2VEC)),
         wikientvec_cache_dir=(
             None
             if options.get("wikientvec_cache_dir") is None
             else str(options.get("wikientvec_cache_dir"))
         ),
         num_iterations=int(options.get("num_iterations", 20)),
+        prior_scale=float(options.get("prior_scale", 0.1)),
     )
+    if not np.isfinite(params.prior_scale) or params.prior_scale <= 0.0:
+        raise ValueError("gaussianlda params.prior_scale must be finite and > 0.")
+    return params
 
 
 def parse_mvtm_params(options: dict[str, Any]) -> MvTMParams:
     alpha = options.get("alpha")
     params = MvTMParams(
-        word2vec=str(options.get("word2vec", "glove-wiki-gigaword-100")),
+        word2vec=str(options.get("word2vec", DEFAULT_PRETRAINED_WORD2VEC)),
         wikientvec_cache_dir=(
             None
             if options.get("wikientvec_cache_dir") is None
@@ -412,6 +434,7 @@ def parse_mvtm_params(options: dict[str, Any]) -> MvTMParams:
         alpha=None if alpha is None else float(alpha),
         estimate_alpha=bool(options.get("estimate_alpha", False)),
         kappa_default=float(options.get("kappa_default", 10.0)),
+        max_kappa=float(options.get("max_kappa", 10_000.0)),
         gibbs_sweeps=int(options.get("gibbs_sweeps", 1)),
         num_samples=int(options.get("num_samples", 1)),
         alpha_update_every=int(options.get("alpha_update_every", 1)),
@@ -429,6 +452,12 @@ def parse_mvtm_params(options: dict[str, Any]) -> MvTMParams:
         raise ValueError("mvtm params.alpha must be > 0 when provided.")
     if params.kappa_default <= 0.0:
         raise ValueError("mvtm params.kappa_default must be > 0.")
+    if not np.isfinite(params.max_kappa) or params.max_kappa <= 0.0:
+        raise ValueError("mvtm params.max_kappa must be finite and > 0.")
+    if not np.isfinite(params.kappa_default):
+        raise ValueError("mvtm params.kappa_default must be finite.")
+    if params.kappa_default > params.max_kappa:
+        raise ValueError("mvtm params.kappa_default must be <= max_kappa.")
     if params.gibbs_sweeps < 1:
         raise ValueError("mvtm params.gibbs_sweeps must be >= 1.")
     if params.num_samples < 1:
@@ -452,7 +481,7 @@ def parse_etm_params(options: dict[str, Any]) -> EtmParams:
     theta_act = str(options.get("theta_act", "relu")).strip().lower()
     optimizer = str(options.get("optimizer", "adam")).strip().lower()
     params = EtmParams(
-        word2vec=str(options.get("word2vec", "glove-wiki-gigaword-100")),
+        word2vec=str(options.get("word2vec", DEFAULT_PRETRAINED_WORD2VEC)),
         wikientvec_cache_dir=(
             None
             if options.get("wikientvec_cache_dir") is None
@@ -505,7 +534,7 @@ def parse_sentence_gaussianlda_params(
     options: dict[str, Any],
 ) -> SentenceGaussianLdaParams:
     common = _parse_encoder_common(options)
-    return SentenceGaussianLdaParams(
+    params = SentenceGaussianLdaParams(
         encoder_model_name=common["encoder_model_name"],
         encode_prefix=common["encode_prefix"],
         encoder_backend=common["encoder_backend"],
@@ -524,7 +553,13 @@ def parse_sentence_gaussianlda_params(
         encode_batch_size=common["encode_batch_size"],
         preencode_corpus=bool(options.get("preencode_corpus", True)),
         soft_temperature=float(options.get("soft_temperature", 1.0)),
+        prior_scale=float(options.get("prior_scale", 0.1)),
     )
+    if not np.isfinite(params.prior_scale) or params.prior_scale <= 0.0:
+        raise ValueError(
+            "sentence_gaussianlda params.prior_scale must be finite and > 0."
+        )
+    return params
 
 
 def parse_sentlda_params(options: dict[str, Any]) -> SentLdaParams:

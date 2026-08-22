@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from itertools import combinations
 from math import log
@@ -17,6 +17,7 @@ import numpy as np
 from src.utils.logging import get_logger, get_progress_bar
 
 from .corpus_bundle import iter_tokenized_reference_corpus
+from .reference_query import ReferenceCountQuery, full_pair_query
 from .topic_word_metrics import (
     DEFAULT_PALMETTO_CV_MIN_WINDOW_COUNT,
     EPSILON_SMOOTHED_COHERENCES,
@@ -35,7 +36,27 @@ from .topic_words import TopicWords
 
 logger = get_logger(__name__)
 
-ReferenceCountBackend = Literal["python", "numba"]
+ReferenceCountBackend = Literal["python", "numba", "numba_interval"]
+
+
+def effective_reference_count_backend(
+    backend: ReferenceCountBackend,
+    *,
+    max_docs: int | None,
+) -> ReferenceCountBackend:
+    """Return the backend that will actually run.
+
+    ``numba_interval`` needs an ordered full scan, so a ``max_docs`` limit forces
+    the chunked ``numba`` path instead. Callers that report which backend was
+    measured have to resolve this the same way the dispatch below does.
+    """
+
+    if backend == "numba_interval" and max_docs is not None:
+        return "numba"
+    return backend
+
+
+ReferenceIndexMode = Literal["off", "auto", "build", "refresh"]
 REFERENCE_PROGRESS_DOC_INTERVAL = 100_000
 DEFAULT_REFERENCE_COUNT_WORKERS = 8
 DEFAULT_REFERENCE_COUNT_CHUNK_SIZE = 25_000
@@ -48,9 +69,12 @@ class ReferenceCountKey:
     min_doc_tokens: int
     window_sizes: tuple[int, ...]
     target_words_fingerprint: str
+    query_fingerprint: str | None = None
+    index_identity: str | None = None
     backend: ReferenceCountBackend = "numba"
     workers: int = DEFAULT_REFERENCE_COUNT_WORKERS
     chunk_size: int = DEFAULT_REFERENCE_COUNT_CHUNK_SIZE
+    max_pending: int | None = None
 
 
 @dataclass
@@ -555,6 +579,7 @@ def _build_parallel_reference_counts(
     backend: ReferenceCountBackend,
     workers: int,
     chunk_size: int,
+    max_pending: int | None,
     progress_label: str,
 ) -> tuple[dict[int, SlidingWindowCounts], Counter[str], Counter[tuple[str, str]], int]:
     counts_by_window_size = {
@@ -596,7 +621,9 @@ def _build_parallel_reference_counts(
         mininterval=1.0,
         disable=not stderr.isatty(),
     )
-    max_pending = max(1, workers * 2)
+    resolved_max_pending = (
+        max(1, workers * 2) if max_pending is None else int(max_pending)
+    )
     chunk: list[list[str]] = []
     with ProcessPoolExecutor(max_workers=workers) as executor:
         for tokens in docs_iter:
@@ -615,7 +642,7 @@ def _build_parallel_reference_counts(
             )
             submitted_docs += len(chunk)
             chunk = []
-            while len(pending) >= max_pending:
+            while len(pending) >= resolved_max_pending:
                 done = next(as_completed(pending))
                 pending.remove(done)
                 completed_docs += _merge_reference_count_result(
@@ -663,6 +690,10 @@ def build_shared_reference_counts(
     workers: int = DEFAULT_REFERENCE_COUNT_WORKERS,
     chunk_size: int = DEFAULT_REFERENCE_COUNT_CHUNK_SIZE,
     progress_label: str = "reference_counts",
+    query: ReferenceCountQuery | None = None,
+    reference_index_mode: ReferenceIndexMode = "off",
+    reference_index_root: Path | None = None,
+    max_pending: int | None = None,
 ) -> SharedReferenceCounts:
     target_words = set(target_words)
     window_sizes = {int(window_size) for window_size in window_sizes}
@@ -674,15 +705,37 @@ def build_shared_reference_counts(
         raise ValueError(f"workers must be >= 1, got {workers}")
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    if max_pending is not None and int(max_pending) < 1:
+        raise ValueError("max_pending must be >= 1 when provided")
+    if reference_index_mode not in {"off", "auto", "build", "refresh"}:
+        raise ValueError(
+            "reference_index_mode must be one of " "{'off', 'auto', 'build', 'refresh'}"
+        )
+    if reference_index_mode != "off" and reference_index_root is None:
+        raise ValueError(
+            "reference_index_root is required when reference_index_mode is not off"
+        )
+    if query is None:
+        query = full_pair_query(
+            target_words=target_words,
+            window_sizes=window_sizes,
+            need_document_counts=True,
+        )
+    elif set(query.target_words) != target_words:
+        raise ValueError("query.target_words must match target_words")
+    elif set(query.window_sizes) != window_sizes:
+        raise ValueError("query.window_sizes must match window_sizes")
     key = ReferenceCountKey(
         reference_path=Path(reference_path),
         max_docs=max_docs,
         min_doc_tokens=int(min_doc_tokens),
         window_sizes=tuple(sorted(window_sizes)),
         target_words_fingerprint=fingerprint_target_words(target_words),
+        query_fingerprint=query.fingerprint,
         backend=backend,
         workers=workers,
         chunk_size=chunk_size,
+        max_pending=max_pending,
     )
     logger.info(
         "%s scan start backend=%s workers=%s chunk_size=%s path=%s target_words=%s "
@@ -696,7 +749,99 @@ def build_shared_reference_counts(
         sorted(window_sizes),
     )
     started = perf_counter()
-    if workers > 1:
+    used_index = False
+    if (
+        backend == "numba_interval"
+        and max_docs is None
+        and reference_index_mode != "off"
+    ):
+        from .reference_index import (
+            build_reference_index,
+            is_reference_index_valid,
+            query_reference_index,
+            refresh_reference_index,
+        )
+
+        assert reference_index_root is not None
+        if reference_index_mode == "refresh":
+            refresh_reference_index(
+                reference_path=Path(reference_path),
+                index_root=reference_index_root,
+                min_doc_tokens=int(min_doc_tokens),
+            )
+        elif reference_index_mode == "build":
+            build_reference_index(
+                reference_path=Path(reference_path),
+                index_root=reference_index_root,
+                min_doc_tokens=int(min_doc_tokens),
+            )
+        if is_reference_index_valid(
+            reference_path=Path(reference_path),
+            index_root=reference_index_root,
+            min_doc_tokens=int(min_doc_tokens),
+        ):
+            counts_by_window_size, doc_word_counts, doc_pair_counts, num_docs = (
+                query_reference_index(
+                    reference_path=Path(reference_path),
+                    index_root=reference_index_root,
+                    query=query,
+                    min_doc_tokens=int(min_doc_tokens),
+                )
+            )
+            used_index = True
+            logger.info(
+                "%s positional index hit root=%s",
+                progress_label,
+                reference_index_root,
+            )
+    resolved_backend = effective_reference_count_backend(backend, max_docs=max_docs)
+    if used_index:
+        pass
+    elif resolved_backend == "numba_interval":
+        from .reference_interval_counts import build_interval_reference_counts
+
+        counts_by_window_size, doc_word_counts, doc_pair_counts, num_docs = (
+            build_interval_reference_counts(
+                reference_path=Path(reference_path),
+                query=query,
+                min_doc_tokens=int(min_doc_tokens),
+                workers=workers,
+                flush_docs=chunk_size,
+            )
+        )
+    elif backend == "numba_interval":
+        logger.info(
+            "%s max_docs=%s requires ordered scan; falling back to numba",
+            progress_label,
+            max_docs,
+        )
+        if workers > 1:
+            counts_by_window_size, doc_word_counts, doc_pair_counts, num_docs = (
+                _build_parallel_reference_counts(
+                    reference_path=Path(reference_path),
+                    target_words=target_words,
+                    window_sizes=window_sizes,
+                    max_docs=max_docs,
+                    min_doc_tokens=int(min_doc_tokens),
+                    backend="numba",
+                    workers=workers,
+                    chunk_size=chunk_size,
+                    max_pending=max_pending,
+                    progress_label=progress_label,
+                )
+            )
+        else:
+            counts_by_window_size, doc_word_counts, doc_pair_counts, num_docs = (
+                _build_numba_reference_counts(
+                    reference_path=Path(reference_path),
+                    target_words=target_words,
+                    window_sizes=window_sizes,
+                    max_docs=max_docs,
+                    min_doc_tokens=int(min_doc_tokens),
+                    progress_label=progress_label,
+                )
+            )
+    elif workers > 1:
         counts_by_window_size, doc_word_counts, doc_pair_counts, num_docs = (
             _build_parallel_reference_counts(
                 reference_path=Path(reference_path),
@@ -707,6 +852,7 @@ def build_shared_reference_counts(
                 backend=backend,
                 workers=workers,
                 chunk_size=chunk_size,
+                max_pending=max_pending,
                 progress_label=progress_label,
             )
         )
@@ -746,6 +892,28 @@ def build_shared_reference_counts(
         },
         perf_counter() - started,
     )
+    requested_pairs = set(query.requested_pairs)
+    for counts in counts_by_window_size.values():
+        counts.pair_window_counts = Counter(
+            {
+                pair: count
+                for pair, count in counts.pair_window_counts.items()
+                if pair in requested_pairs
+            }
+        )
+    if query.need_document_counts:
+        doc_pair_counts = Counter(
+            {
+                pair: count
+                for pair, count in doc_pair_counts.items()
+                if pair in requested_pairs
+            }
+        )
+    else:
+        doc_word_counts = Counter()
+        doc_pair_counts = Counter()
+    if used_index:
+        key = replace(key, index_identity=str(reference_index_root))
     return SharedReferenceCounts(
         key=key,
         counts_by_window_size=counts_by_window_size,

@@ -9,6 +9,8 @@ import numpy as np
 class GaussianPriorLike(Protocol):
     kappa: float
     mu: Any
+    scale_sigma: float
+    nu: float
 
 
 class GaussianTrainerLike(Protocol):
@@ -51,6 +53,8 @@ class GaussianTrainerState:
     avg_ll_kernel_backend: str | None = None
     training_corpus_preencoded: bool | None = None
     training_corpus_encoding_sec: float | None = None
+    prior_scale: float | None = None
+    prior_nu: float | None = None
 
 
 def validate_gaussian_trainer_state(
@@ -123,6 +127,16 @@ def snapshot_gaussian_trainer(
             None
             if getattr(trainer, "training_corpus_encoding_sec", None) is None
             else float(getattr(trainer, "training_corpus_encoding_sec"))
+        ),
+        prior_scale=(
+            None
+            if getattr(trainer.prior, "scale_sigma", None) is None
+            else float(getattr(trainer.prior, "scale_sigma"))
+        ),
+        prior_nu=(
+            None
+            if getattr(trainer.prior, "nu", None) is None
+            else float(getattr(trainer.prior, "nu"))
         ),
     )
 

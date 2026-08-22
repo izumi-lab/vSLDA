@@ -643,8 +643,14 @@ def test_evaluation_word_based_metrics_dispatches_data_runs_to_registry(
             "doc_npmi",
             "--diversity-topn",
             "30",
-            "--proxy-word-score-mode",
-            "word_npmi",
+            "--topic-word-score-mode",
+            "topic_word_probability",
+            "--posterior-num-chains",
+            "3",
+            "--posterior-retained-samples",
+            "12",
+            "--etm-theta-samples",
+            "7",
             "--coherence-reference",
             "wikipedia",
             "--coherence-reference-path",
@@ -673,9 +679,12 @@ def test_evaluation_word_based_metrics_dispatches_data_runs_to_registry(
     assert captured["kwargs"]["data_runs"] == ["fy2024"]
     assert captured["kwargs"]["coherence"] == "doc_npmi"
     assert captured["kwargs"]["diversity_topn"] == 30
+    assert captured["kwargs"]["topic_word_score_mode"] == "topic_word_probability"
     assert captured["kwargs"]["dict_no_below"] == 3
     assert captured["kwargs"]["dict_no_above"] == 0.7
-    assert captured["kwargs"]["proxy_word_score_mode"] == "word_npmi"
+    assert captured["kwargs"]["posterior_num_chains"] == 3
+    assert captured["kwargs"]["posterior_retained_samples"] == 12
+    assert captured["kwargs"]["etm_theta_samples"] == 7
     assert captured["kwargs"]["coherence_reference"] == "wikipedia"
     assert captured["kwargs"]["coherence_reference_path"] == tmp_path / "wiki.jsonl"
     assert captured["kwargs"]["coherence_window_size"] == 110

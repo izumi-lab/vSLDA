@@ -24,22 +24,22 @@ LIMITED_FILE_RE = re.compile(r"^(acc|f1)_(.+)_(\d+)topic_(ratio|count)(.+)\.json
 FULL_FILE_RE = re.compile(r"^(acc|f1)_(.+)_(\d+)topic\.json$")
 MODEL_LABELS = {
     "Blei LDA": "LDA",
-    "sentLDA": "SLDA",
+    "sentLDA": "SentLDA",
     "Gaussian LDA": "GLDA",
     "MvTM": "vLDA",
     "ETM": "ETM",
-    "Contextual TM": "CTM",
+    "Contextual TM": "ConTM",
     "SenClu": "SenClu",
     "Sentence LDA": "GSLDA",
     "vMF Sentence LDA": "vSLDA(proposed)",
 }
 MODEL_ORDER = [
     "LDA",
-    "SLDA",
+    "SentLDA",
     "GLDA",
     "vLDA",
     "ETM",
-    "CTM",
+    "ConTM",
     "SenClu",
     "GSLDA",
     "vSLDA(proposed)",
@@ -418,14 +418,21 @@ def _write_legend_figure(
     outdir: Path,
     colormap: str,
     filename: str = "legend.png",
+    ncol: int = 1,
 ) -> None:
     if not models:
         return
     _ensure_dir(outdir)
     labels = [_display_model_name(model) for model in models]
     unique_labels = list(dict.fromkeys(labels))
-    fig_width = 3.2
-    fig_height = max(2.2, 0.34 * len(unique_labels) + 0.4)
+    column_count = min(ncol, len(unique_labels))
+    row_count = int(np.ceil(len(unique_labels) / column_count))
+    if column_count == 1:
+        fig_width = 3.2
+        fig_height = max(2.2, 0.34 * len(unique_labels) + 0.4)
+    else:
+        fig_width = max(6.4, 1.45 * column_count)
+        fig_height = max(1.0, 0.42 * row_count + 0.4)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     ax.axis("off")
     handles = [
@@ -445,7 +452,7 @@ def _write_legend_figure(
         handles=handles,
         labels=unique_labels,
         loc="center",
-        ncol=1,
+        ncol=column_count,
         frameon=True,
         fancybox=False,
         edgecolor="black",
@@ -608,6 +615,11 @@ def main() -> None:
         action="store_true",
         help="Read every archived/legacy JSON file instead of only latest pointers.",
     )
+    parser.add_argument(
+        "--legend-only",
+        action="store_true",
+        help="Only write legend.png and legend_h.png; skip category figures.",
+    )
     args = parser.parse_args()
 
     ylim = tuple(args.ylim) if args.ylim is not None else None
@@ -634,20 +646,21 @@ def main() -> None:
     outdir = Path(args.outdir)
     _ensure_dir(outdir)
 
-    _plot_all(
-        data,
-        metrics=args.metrics,
-        datasets=datasets,
-        topics_list=topics_list,
-        modes=args.modes,
-        categories=args.categories,
-        models=args.models,
-        outdir=outdir,
-        no_errorbar=args.no_errorbar,
-        include_average=args.include_average,
-        ylim=ylim,
-        colormap=args.colormap,
-    )
+    if not args.legend_only:
+        _plot_all(
+            data,
+            metrics=args.metrics,
+            datasets=datasets,
+            topics_list=topics_list,
+            modes=args.modes,
+            categories=args.categories,
+            models=args.models,
+            outdir=outdir,
+            no_errorbar=args.no_errorbar,
+            include_average=args.include_average,
+            ylim=ylim,
+            colormap=args.colormap,
+        )
 
     legend_models = _collect_legend_models(
         data,
@@ -663,6 +676,13 @@ def main() -> None:
         models=legend_models,
         outdir=outdir,
         colormap=args.colormap,
+    )
+    _write_legend_figure(
+        models=legend_models,
+        outdir=outdir,
+        colormap=args.colormap,
+        filename="legend_h.png",
+        ncol=8,
     )
 
 

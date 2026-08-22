@@ -27,6 +27,7 @@ from src.experiments.config import (
     resolve_run_selection,
     resolve_targets,
 )
+from src.experiments.config_parsers import parse_train_config
 
 
 def _write_config(tmp_path: Path, payload: dict) -> Path:
@@ -47,6 +48,26 @@ def _minimal_config_payload(*, dataset: dict, encoder: dict | None = None) -> di
         "baselines": [],
         "output_root": "results/experiments",
     }
+
+
+def test_parse_train_config_validates_max_kappa() -> None:
+    base = {"train": {"num_topics": 10, "num_iterations": 1}}
+    assert parse_train_config(base).max_kappa == 10_000.0
+    with pytest.raises(ValueError, match="max_kappa"):
+        parse_train_config(
+            {"train": {"num_topics": 10, "num_iterations": 1, "max_kappa": 0}}
+        )
+    with pytest.raises(ValueError, match="kappa_default must be <="):
+        parse_train_config(
+            {
+                "train": {
+                    "num_topics": 10,
+                    "num_iterations": 1,
+                    "kappa_default": 11,
+                    "max_kappa": 10,
+                }
+            }
+        )
 
 
 def test_load_config_resolves_common_fields() -> None:
@@ -131,6 +152,108 @@ def test_sentence_embedding_baseline_encoder_defaults_follow_configured_encoder(
     assert (
         params_by_runner["sentence_gaussianlda"].encode_prefix
         == cfg.encoder.encode_prefix
+    )
+
+
+def test_prior_scale_cli_override_only_changes_gaussian_family(tmp_path: Path) -> None:
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"runner": "gaussianlda", "params": {"prior_scale": 0.1}},
+        {"runner": "sentence_gaussianlda", "params": {"prior_scale": 0.1}},
+        {"runner": "mvtm", "params": {"num_components": 1}},
+    ]
+
+    cfg = load_config(_write_config(tmp_path, payload), prior_scale=3.0)
+
+    assert cfg.baselines[0].params.prior_scale == pytest.approx(3.0)
+    assert cfg.baselines[1].params.prior_scale == pytest.approx(3.0)
+    assert not hasattr(cfg.baselines[2].params, "prior_scale")
+
+
+def test_word2vec_cli_override_only_changes_word_embedding_runners(
+    tmp_path: Path,
+) -> None:
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"runner": "gaussianlda", "params": {"word2vec": "glove-wiki-gigaword-100"}},
+        {"runner": "etm", "params": {"word2vec": "glove-wiki-gigaword-100"}},
+        {"runner": "mvtm", "params": {"word2vec": "glove-wiki-gigaword-100"}},
+        {"runner": "bleilda"},
+    ]
+
+    cfg = load_config(
+        _write_config(tmp_path, payload), word2vec="word2vec-google-news-300"
+    )
+    params_by_runner = {baseline.runner: baseline.params for baseline in cfg.baselines}
+
+    assert params_by_runner["gaussianlda"].word2vec == "word2vec-google-news-300"
+    assert params_by_runner["etm"].word2vec == "word2vec-google-news-300"
+    assert params_by_runner["mvtm"].word2vec == "word2vec-google-news-300"
+    assert not hasattr(params_by_runner["bleilda"], "word2vec")
+
+
+def test_word2vec_override_absent_keeps_config_value(tmp_path: Path) -> None:
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"runner": "gaussianlda", "params": {"word2vec": "glove-wiki-gigaword-100"}},
+    ]
+
+    cfg = load_config(_write_config(tmp_path, payload))
+
+    assert cfg.baselines[0].params.word2vec == "glove-wiki-gigaword-100"
+
+
+def test_word2vec_override_drives_result_path_suffix(tmp_path: Path) -> None:
+    from src.baselines.adapter_runtime import _baseline_embedding_variant
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"runner": "gaussianlda", "params": {"word2vec": "glove-wiki-gigaword-100"}},
+    ]
+    config_path = _write_config(tmp_path, payload)
+
+    glove = load_config(config_path)
+    googlenews = load_config(config_path, word2vec="word2vec-google-news-300")
+
+    assert (
+        _baseline_embedding_variant(
+            runner="gaussianlda", baseline_params=glove.baselines[0].params
+        )
+        == "glove100"
+    )
+    assert (
+        _baseline_embedding_variant(
+            runner="gaussianlda", baseline_params=googlenews.baselines[0].params
+        )
+        == "googlenews300"
     )
 
 
@@ -233,6 +356,7 @@ def test_load_config_supports_extends_override(tmp_path: Path) -> None:
     assert list(cfg.dataset.categories.keys()) == ["all"]
     assert cfg.train.num_topics == [50]
     assert cfg.train.alpha == 0.1
+    assert cfg.train.max_kappa == 10_000.0
 
 
 def test_load_config_from_smoke_directory(tmp_path: Path) -> None:
@@ -253,6 +377,7 @@ def test_load_config_from_smoke_directory(tmp_path: Path) -> None:
             "num_topics": 5,
             "num_iterations": 3,
             "kappa_default": 10.0,
+            "max_kappa": 2500.0,
             "gibbs_sweeps": 2,
             "num_samples": 1,
         },
@@ -275,6 +400,7 @@ def test_load_config_from_smoke_directory(tmp_path: Path) -> None:
     assert cfg.dataset.name == "japanese_smoke"
     assert cfg.dataset.train_csv.name == "train.csv"
     assert cfg.train.num_topics == [5]
+    assert cfg.train.max_kappa == 2500.0
     assert cfg.preset.kind == "smoke"
 
 
@@ -895,6 +1021,7 @@ def test_load_config_parses_mvtm_params(tmp_path: Path) -> None:
                     "num_iterations": "7",
                     "alpha": None,
                     "estimate_alpha": False,
+                    "max_kappa": "2500",
                     "gibbs_sweeps": "3",
                     "num_samples": "2",
                 },
@@ -911,6 +1038,7 @@ def test_load_config_parses_mvtm_params(tmp_path: Path) -> None:
     assert cfg.baselines[0].params.num_iterations == 7
     assert cfg.baselines[0].params.alpha is None
     assert cfg.baselines[0].params.estimate_alpha is False
+    assert cfg.baselines[0].params.max_kappa == 2500.0
     assert cfg.baselines[0].params.gibbs_sweeps == 3
     assert cfg.baselines[0].params.num_samples == 2
 

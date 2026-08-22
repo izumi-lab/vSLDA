@@ -37,6 +37,8 @@ def run_experiments_workflow(
     iterations: Sequence[int] | None,
     encoder_model: str | None = None,
     strip_terminal_normalize: bool | None = None,
+    prior_scale: float | None = None,
+    word2vec: str | None = None,
 ) -> Path:
     return run_comparison(
         config_path=config,
@@ -47,6 +49,8 @@ def run_experiments_workflow(
         vmf_soft_temp=vmf_soft_temp,
         encoder_model=encoder_model,
         strip_terminal_normalize=strip_terminal_normalize,
+        prior_scale=prior_scale,
+        word2vec=word2vec,
         categories=None if categories is None else list(categories),
         num_topics=None if topics is None else list(topics),
         iterations=None if iterations is None else list(iterations),

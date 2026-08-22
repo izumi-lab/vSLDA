@@ -47,6 +47,7 @@ class VmfRunOptions:
     num_iterations: int
     alpha: float | Sequence[float] | None
     kappa_default: float
+    max_kappa: float
     num_components: int
     gibbs_sweeps: int
     num_samples: int
@@ -184,6 +185,7 @@ def build_vmf_condition_payload(
         "ja_dicdir": cfg.preprocess.ja_dicdir,
         "ja_require_unidic": cfg.preprocess.ja_require_unidic,
         "soft_temperature": float(job.vmf_soft_temp),
+        "max_kappa": float(_train_attr(cfg.train, "max_kappa", 10_000.0)),
         "alpha_min_value": float(_train_attr(cfg.train, "alpha_min_value", 1e-3)),
         "repair_empty_topics": bool(
             _train_attr(cfg.train, "repair_empty_topics", True)
@@ -244,6 +246,7 @@ def build_vmf_run_options(
         num_iterations=cfg.train.num_iterations,
         alpha=cfg.train.alpha,
         kappa_default=cfg.train.kappa_default,
+        max_kappa=_train_attr(cfg.train, "max_kappa", 10_000.0),
         num_components=cfg.train.num_components,
         gibbs_sweeps=cfg.train.gibbs_sweeps,
         num_samples=cfg.train.num_samples,
@@ -370,6 +373,7 @@ def run_vmf_job(*, job: CategoryJob, logger: object) -> VmfRunExecution:
         test_csvs=tuple(vmf_options.test_csvs),
         fiscal_years=job.fiscal_years,
         num_components=int(cfg.train.num_components),
+        max_kappa=float(vmf_options.max_kappa),
         encoder_config=_encoder_config_payload(job),
     )
     metadata_path = vmf_out_dir / METADATA_FILENAME
