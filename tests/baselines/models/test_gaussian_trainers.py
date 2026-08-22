@@ -55,6 +55,7 @@ def test_gaussian_trainer_is_deterministic_with_fixed_seed() -> None:
         vocab,
         num_tables=2,
         alpha=0.1,
+        prior_scale=3.0,
     )
     trainer_a.sample(2)
 
@@ -65,6 +66,7 @@ def test_gaussian_trainer_is_deterministic_with_fixed_seed() -> None:
         vocab,
         num_tables=2,
         alpha=0.1,
+        prior_scale=3.0,
     )
     trainer_b.sample(2)
 
@@ -77,6 +79,8 @@ def test_gaussian_trainer_is_deterministic_with_fixed_seed() -> None:
         np.asarray(trainer_b.table_assignments, dtype=np.int64),
     )
     assert np.allclose(trainer_a.average_ll, trainer_b.average_ll)
+    assert trainer_a.prior.scale_sigma == pytest.approx(3.0)
+    assert np.allclose(trainer_a.prior.sigma, np.eye(2) * 3.0)
     assert len(trainer_a.iteration_diagnostics) == 2
     assert trainer_a.iteration_diagnostics[0].sampling_sec >= 0.0
     assert trainer_a.iteration_diagnostics[0].avg_log_likelihood_sec >= 0.0
@@ -103,6 +107,7 @@ def test_sentence_gaussian_trainer_preencoding_preserves_results_and_reduces_enc
         alpha=0.1,
         kappa=0.1,
         preencode_corpus=True,
+        prior_scale=3.0,
     )
     trainer_pre.sample(2)
 
@@ -115,6 +120,7 @@ def test_sentence_gaussian_trainer_preencoding_preserves_results_and_reduces_enc
         alpha=0.1,
         kappa=0.1,
         preencode_corpus=False,
+        prior_scale=3.0,
     )
     trainer_raw.sample(2)
 
@@ -127,6 +133,8 @@ def test_sentence_gaussian_trainer_preencoding_preserves_results_and_reduces_enc
         np.asarray(trainer_raw.table_assignments, dtype=np.int64),
     )
     assert np.allclose(trainer_pre.average_ll, trainer_raw.average_ll)
+    assert trainer_pre.prior.scale_sigma == pytest.approx(3.0)
+    assert np.allclose(trainer_pre.prior.sigma, np.eye(2) * 3.0)
     assert trainer_pre.training_corpus_preencoded is True
     assert trainer_raw.training_corpus_preencoded is False
     assert encoder_pre.call_count < encoder_raw.call_count

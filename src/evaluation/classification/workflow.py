@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from src.baselines.params import format_prior_scale_variant
 from src.core.path_builders import (
     build_archive_result_dir,
     build_latest_result_dir,
@@ -55,6 +56,7 @@ class ClassificationCondition:
     embedding_variants: Sequence[str] | None = None
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE
     selected_models: Sequence[str] | None = None
+    prior_scale: float | None = None
     data_run: str = "default"
     mode: str | None = None
     value: float | int | None = None
@@ -83,6 +85,7 @@ class ClassificationCondition:
                 if self.selected_models is None
                 else sorted(str(item) for item in self.selected_models)
             ),
+            "prior_scale": self.prior_scale,
         }
         if self.mode is not None:
             payload["mode"] = self.mode
@@ -127,6 +130,8 @@ class ClassificationCondition:
             extra_labels.append(
                 "models-" + "-".join(sorted(str(item) for item in self.selected_models))
             )
+        if self.prior_scale is not None:
+            extra_labels.append(format_prior_scale_variant(self.prior_scale))
         if self.mode is not None:
             extra_labels.append(self.mode)
         if self.value is not None:
@@ -170,6 +175,7 @@ class ClassificationCondition:
             if self.selected_models is None
             else sorted(str(item) for item in self.selected_models)
         )
+        meta["prior_scale"] = self.prior_scale
         meta["display_key"] = self.display_key()
         if self.mode is not None:
             meta["mode"] = self.mode
@@ -200,6 +206,7 @@ def build_classification_condition_payload(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -218,6 +225,7 @@ def build_classification_condition_payload(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -239,6 +247,7 @@ def build_classification_condition_id(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -257,6 +266,7 @@ def build_classification_condition_id(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -366,6 +376,7 @@ def build_classification_meta(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -385,6 +396,7 @@ def build_classification_meta(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -474,6 +486,7 @@ def run_classification_grid(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     write_spec_builder: Callable[[int, str, int], EvaluationWriteSpec],
     train_runner: TrainRunner,
     train_index_resolver: TrainIndexResolver | None = None,
@@ -582,6 +595,7 @@ def run_classification_grid(
                                 embedding_variants=embedding_variants,
                                 feature_resolve_mode=feature_resolve_mode,
                                 selected_models=selected_models,
+                                prior_scale=prior_scale,
                             )
                             break
                         except ValueError as exc:

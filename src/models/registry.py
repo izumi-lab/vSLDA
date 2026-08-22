@@ -54,6 +54,7 @@ class VmfRequestOptions:
     encoder_strip_terminal_normalize: bool
     alpha: float | Sequence[float] | None
     kappa_default: float
+    max_kappa: float
     num_components: int
     encoder_pre_normalize_transform: str
     encoder_whitening_eps: float
@@ -108,6 +109,7 @@ class VmfRequestOptions:
             ),
             alpha=options.get("alpha"),
             kappa_default=options["kappa_default"],
+            max_kappa=float(options.get("max_kappa", 10_000.0)),
             num_components=options.get("num_components", 1),
             encoder_pre_normalize_transform=options["encoder_pre_normalize_transform"],
             encoder_whitening_eps=options["encoder_whitening_eps"],
@@ -216,6 +218,7 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
         num_topics=request.num_topics,
         alpha=options.alpha,
         kappa=options.kappa_default,
+        max_kappa=options.max_kappa,
         num_components=options.num_components,
         pre_normalize_transform=options.encoder_pre_normalize_transform,
         whitening_eps=options.encoder_whitening_eps,

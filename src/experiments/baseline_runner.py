@@ -129,7 +129,7 @@ def run_baselines_for_category(
         serialized_paths = artifact_refs_to_string_map(artifact_refs)
         results.append(
             build_baseline_summary(
-                display_name=spec.display_name,
+                display_name=baseline.name,
                 runner_key=spec.key,
                 runner_family=spec.family,
                 paths=serialized_paths,

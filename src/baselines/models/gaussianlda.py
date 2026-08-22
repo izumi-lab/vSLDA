@@ -288,6 +288,7 @@ def train_gaussianlda(
         num_topics,
         1.0 / float(num_topics),
         save_path=None,
+        prior_scale=params.prior_scale,
     )
     trainer.sample(params.num_iterations)
     trainer_state = snapshot_gaussian_trainer(trainer)

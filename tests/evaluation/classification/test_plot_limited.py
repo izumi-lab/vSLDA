@@ -210,11 +210,11 @@ def test_display_labels_and_sort_order_match_paper_model_order() -> None:
 
     assert sorted_labels == [
         "LDA",
-        "SLDA",
+        "SentLDA",
         "GLDA",
         "vLDA",
         "ETM",
-        "CTM",
+        "ConTM",
         "SenClu",
         "GSLDA",
         "vSLDA(proposed)",
@@ -311,6 +311,13 @@ def test_collect_legend_models_and_write_legend_figure(
         include_average=False,
     )
     _write_legend_figure(models=legend_models, outdir=outdir, colormap="tab10")
+    _write_legend_figure(
+        models=legend_models,
+        outdir=outdir,
+        colormap="tab10",
+        filename="legend_h.png",
+        ncol=8,
+    )
 
     assert legend_models == [
         "ETM [glove100] [SVM]",
@@ -318,3 +325,4 @@ def test_collect_legend_models_and_write_legend_figure(
         "vMF Sentence LDA [c1_mpnet] [SVM]",
     ]
     assert (outdir / "legend.png").is_file()
+    assert (outdir / "legend_h.png").is_file()

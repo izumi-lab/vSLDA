@@ -40,6 +40,10 @@ class VMFIterationDiagnostics:
     empty_topics: list[int]
     min_topic_count: int
     max_topic_count: int
+    estimated_kappa_max: float | None
+    stored_kappa_max: float
+    num_kappa_clipped: int
+    clipped_topic_ids: list[int]
     alpha_min: float
     alpha_max: float
     alpha_mean: float
@@ -96,6 +100,8 @@ class VMFInvariantReport:
     active_topics: int
     alpha_positive: bool
     alpha_finite: bool
+    kappa_positive_finite: bool
+    kappa_within_bound: bool
     topic_counts_match_assignments: bool
     doc_topic_counts_match_assignments: bool
     topic_means_unit_norm: bool
@@ -108,6 +114,8 @@ class VMFInvariantReport:
             [
                 self.alpha_positive,
                 self.alpha_finite,
+                self.kappa_positive_finite,
+                self.kappa_within_bound,
                 self.topic_counts_match_assignments,
                 self.doc_topic_counts_match_assignments,
                 self.topic_means_unit_norm,
@@ -143,6 +151,7 @@ class VMFLDATrainer:
         alpha: float | Sequence[float] | None,
         kappa: float,
         num_components: int = 1,
+        max_kappa: float = 10_000.0,
         pre_normalize_transform: str = "none",
         whitening_eps: float = 1e-5,
         algorithm_variant: str | None = None,
@@ -170,6 +179,8 @@ class VMFLDATrainer:
                 Number of vMF components per topic C.
                 C=1: single vMF per topic.
                 C>1: mixture of vMFs per topic.
+            max_kappa:
+                Finite positive upper bound applied to learned κ values.
             pre_normalize_transform:
                 Embedding transform applied after encode and before L2 normalization.
                 One of: {"none", "mean_center", "whitening"}.
@@ -194,6 +205,15 @@ class VMFLDATrainer:
 
         self.alpha = self._init_alpha(alpha)
         self.kappa_default = float(kappa)
+        self.max_kappa = float(max_kappa)
+        if not np.isfinite(self.max_kappa) or self.max_kappa <= 0.0:
+            raise ValueError("max_kappa must be finite and > 0")
+        if not np.isfinite(self.kappa_default) or self.kappa_default <= 0.0:
+            raise ValueError("kappa must be finite and > 0")
+        if self.kappa_default > self.max_kappa:
+            raise ValueError("kappa must be <= max_kappa")
+        self._last_estimated_kappa_max: float | None = None
+        self._last_clipped_topic_ids: list[int] = []
         self.document_encoder = VMFDocumentEncoder(
             encoder=encoder,
             embedding_size=self.embedding_size,
@@ -454,10 +474,29 @@ class VMFLDATrainer:
         denominator = 1.0 - l_k**2
         kappa_est = numerator / (denominator + 1e-12)
 
-        if not np.isfinite(kappa_est) or kappa_est <= 0:
-            self.kappa_per_topic[k] = self.kappa_default
-        else:
-            self.kappa_per_topic[k] = kappa_est
+        self.kappa_per_topic[k] = self._sanitize_kappa_estimate(kappa_est)
+
+    def _sanitize_kappa_estimate(
+        self,
+        estimate: float,
+        *,
+        topic_id: int | None = None,
+        record_diagnostics: bool = False,
+    ) -> float:
+        """Return a valid bounded concentration and optionally record clipping."""
+
+        value = float(estimate)
+        if not np.isfinite(value) or value <= 0.0:
+            return self.kappa_default
+        if record_diagnostics:
+            if (
+                self._last_estimated_kappa_max is None
+                or value > self._last_estimated_kappa_max
+            ):
+                self._last_estimated_kappa_max = value
+            if value > self.max_kappa and topic_id is not None:
+                self._last_clipped_topic_ids.append(int(topic_id))
+        return min(value, self.max_kappa)
 
     def _initialize_single_vmf(self) -> None:
         """
@@ -948,6 +987,8 @@ class VMFLDATrainer:
         c_components = self.num_components
         d_dim = self.embedding_size
         eps = 1e-12
+        self._last_estimated_kappa_max = None
+        self._last_clipped_topic_ids = []
 
         for k in range(self.num_topics):
             n_k = nk[k]
@@ -991,10 +1032,11 @@ class VMFLDATrainer:
                 numerator = r_k * d_dim - r_k**3
                 denominator = 1.0 - r_k**2
                 kappa_est = numerator / (denominator + eps)
-                if not np.isfinite(kappa_est) or kappa_est <= 0:
-                    self.kappa_per_topic[k] = self.kappa_default
-                else:
-                    self.kappa_per_topic[k] = kappa_est
+                self.kappa_per_topic[k] = self._sanitize_kappa_estimate(
+                    kappa_est,
+                    topic_id=k,
+                    record_diagnostics=True,
+                )
 
             eff = (self.mixture_weights[k][:, None] * self.component_means[k]).sum(
                 axis=0
@@ -1114,6 +1156,14 @@ class VMFLDATrainer:
             empty_topics=empty_topics,
             min_topic_count=int(topic_counts.min()) if topic_counts.size else 0,
             max_topic_count=int(topic_counts.max()) if topic_counts.size else 0,
+            estimated_kappa_max=self._last_estimated_kappa_max,
+            stored_kappa_max=(
+                float(np.max(self.kappa_per_topic))
+                if self.kappa_per_topic.size
+                else float("nan")
+            ),
+            num_kappa_clipped=len(self._last_clipped_topic_ids),
+            clipped_topic_ids=sorted(set(self._last_clipped_topic_ids)),
             alpha_min=float(alpha.min()) if alpha.size else float("nan"),
             alpha_max=float(alpha.max()) if alpha.size else float("nan"),
             alpha_mean=float(alpha.mean()) if alpha.size else float("nan"),
@@ -1272,6 +1322,11 @@ class VMFLDATrainer:
             active_topics=int(np.count_nonzero(self.topic_counts)),
             alpha_positive=bool(np.all(np.asarray(self.alpha) > 0.0)),
             alpha_finite=bool(np.all(np.isfinite(np.asarray(self.alpha)))),
+            kappa_positive_finite=bool(
+                np.all(np.isfinite(self.kappa_per_topic))
+                and np.all(self.kappa_per_topic > 0.0)
+            ),
+            kappa_within_bound=bool(np.all(self.kappa_per_topic <= self.max_kappa)),
             topic_counts_match_assignments=bool(
                 np.array_equal(
                     np.asarray(self.topic_counts, dtype=np.int64),
@@ -1431,6 +1486,7 @@ class VMFLDATrainer:
             alpha=self.alpha,
             num_topics=self.num_topics,
             kappa_default=self.kappa_default,
+            max_kappa=self.max_kappa,
             num_components=self.num_components,
             pre_normalize_transform=self.pre_normalize_transform,
             whitening_eps=self.whitening_eps,
@@ -1457,6 +1513,7 @@ class VMFLDATrainer:
                 "model_name": "vmf_sentence_lda",
                 "num_topics": self.num_topics,
                 "num_components": self.num_components,
+                "max_kappa": self.max_kappa,
                 "algorithm_variant": self.algorithm_variant,
             },
         )

@@ -13,7 +13,12 @@ from src.baselines.models.gaussianlda import (
     persist_gaussianlda_run,
     train_gaussianlda,
 )
-from src.baselines.params import GaussianLdaParams, parse_gaussianlda_params
+from src.baselines.params import (
+    GaussianLdaParams,
+    format_prior_scale_variant,
+    parse_gaussianlda_params,
+    parse_sentence_gaussianlda_params,
+)
 from src.core.artifacts import load_pickle
 from src.data.preprocessing import PreprocessedDocument
 
@@ -27,10 +32,46 @@ class _RoundTripGaussianScorer:
         return [int(token) % 2 for token in doc]
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0.01, "psi0-0p01"),
+        (0.1, "psi0-0p1"),
+        (0.10, "psi0-0p1"),
+        (1.0, "psi0-1"),
+        (3.0, "psi0-3"),
+    ],
+)
+def test_format_prior_scale_variant(value: float, expected: str) -> None:
+    assert format_prior_scale_variant(value) == expected
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_format_prior_scale_variant_rejects_invalid_values(value: float) -> None:
+    with pytest.raises(ValueError, match="prior_scale"):
+        format_prior_scale_variant(value)
+
+
 def test_parse_gaussianlda_params_defaults_num_iterations_to_20() -> None:
     params = parse_gaussianlda_params({})
 
     assert params.num_iterations == 20
+    assert params.prior_scale == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize(
+    ("parser", "runner"),
+    [
+        (parse_gaussianlda_params, "gaussianlda"),
+        (parse_sentence_gaussianlda_params, "sentence_gaussianlda"),
+    ],
+)
+def test_gaussian_family_params_accept_positive_prior_scale(parser, runner) -> None:
+    assert parser({"prior_scale": 3.0}).prior_scale == pytest.approx(3.0)
+
+    for invalid in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match=rf"{runner} params\.prior_scale"):
+            parser({"prior_scale": invalid})
 
 
 def test_train_gaussianlda_uses_reference_alpha_inverse_num_topics(
@@ -61,6 +102,7 @@ def test_train_gaussianlda_uses_reference_alpha_inverse_num_topics(
             alpha,
             *,
             save_path,
+            prior_scale,
         ) -> None:
             captured["corpus"] = corpus
             captured["vocab_embeddings"] = vocab_embeddings
@@ -68,6 +110,7 @@ def test_train_gaussianlda_uses_reference_alpha_inverse_num_topics(
             captured["num_tables"] = num_tables
             captured["alpha"] = alpha
             captured["save_path"] = save_path
+            captured["prior_scale"] = prior_scale
 
         def sample(self, num_iterations: int) -> None:
             captured["num_iterations"] = num_iterations
@@ -109,7 +152,7 @@ def test_train_gaussianlda_uses_reference_alpha_inverse_num_topics(
         ja_dicdir=None,
         ja_require_unidic=True,
         num_topics=5,
-        params=GaussianLdaParams(num_iterations=13),
+        params=GaussianLdaParams(num_iterations=13, prior_scale=3.0),
         train_dir=tmp_path,
         use_legacy=False,
     )
@@ -117,6 +160,7 @@ def test_train_gaussianlda_uses_reference_alpha_inverse_num_topics(
     assert captured["num_tables"] == 5
     assert captured["alpha"] == pytest.approx(0.2)
     assert captured["num_iterations"] == 13
+    assert captured["prior_scale"] == pytest.approx(3.0)
     assert result.trainer_state.alpha == pytest.approx(0.2)
 
 

@@ -56,15 +56,15 @@ baselines:
   - name: Gaussian LDA
     runner: gaussianlda
     params:
-      word2vec: glove-wiki-gigaword-100
+      word2vec: word2vec-google-news-300
   - name: ETM
     runner: etm
     params:
-      word2vec: glove-wiki-gigaword-100
+      word2vec: word2vec-google-news-300
   - name: MvTM
     runner: mvtm
     params:
-      word2vec: glove-wiki-gigaword-100
+      word2vec: word2vec-google-news-300
       num_components: 1
   - name: Sentence LDA
     runner: sentence_gaussianlda

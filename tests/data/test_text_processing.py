@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 
@@ -156,6 +159,42 @@ def test_tokenize_documents_raises_explicit_error_without_wordnet(
             language="english",
             tokenizer="default",
         )
+    english_tokenizer_module._get_wordnet_lemmatizer.cache_clear()
+
+
+def test_wordnet_initialization_is_serialized_across_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_count = 8
+    start = Barrier(worker_count)
+    state_lock = Lock()
+    active_loads = 0
+    max_active_loads = 0
+
+    def _ensure_loaded() -> None:
+        nonlocal active_loads, max_active_loads
+        with state_lock:
+            active_loads += 1
+            max_active_loads = max(max_active_loads, active_loads)
+        time.sleep(0.01)
+        with state_lock:
+            active_loads -= 1
+
+    english_tokenizer_module._get_wordnet_lemmatizer.cache_clear()
+    monkeypatch.setattr(
+        "src.utils.english_tokenizer.wordnet.ensure_loaded",
+        _ensure_loaded,
+    )
+
+    def _load_lemmatizer(_index: int) -> object:
+        start.wait()
+        return english_tokenizer_module._get_wordnet_lemmatizer()
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        lemmatizers = list(executor.map(_load_lemmatizer, range(worker_count)))
+
+    assert max_active_loads == 1
+    assert all(lemmatizer is not None for lemmatizer in lemmatizers)
     english_tokenizer_module._get_wordnet_lemmatizer.cache_clear()
 
 

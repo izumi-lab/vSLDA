@@ -177,6 +177,7 @@ def collect_feature_sets(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
     target_column: str = "target_str",
     label_schema: str = "identity",
 ) -> tuple[list[FeatureSet], list[int], list[int], dict[str, Any]]:
@@ -192,6 +193,7 @@ def collect_feature_sets(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     ):
         if selectors and not any(
             model_matches_selector(
@@ -336,6 +338,7 @@ def run_classification_task(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> (
     tuple[
         dict[str, float],
@@ -366,6 +369,7 @@ def run_classification_task(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
         target_column=target_column,
         label_schema=label_schema,
     )

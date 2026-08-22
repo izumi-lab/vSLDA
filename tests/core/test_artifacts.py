@@ -70,6 +70,7 @@ def test_save_vmf_metadata_persists_axes_schema(tmp_path: Path) -> None:
         train_csvs=("data/20newsgroup/train.csv",),
         test_csvs=("data/20newsgroup/test.csv",),
         fiscal_years=None,
+        max_kappa=10_000.0,
     )
     out_path = tmp_path / "metadata.json"
 
@@ -96,6 +97,7 @@ def test_save_vmf_metadata_persists_axes_schema(tmp_path: Path) -> None:
     assert loaded["tokenizer"] == "default"
     assert loaded["has_labels"] is True
     assert loaded["ja_replace_num"] is True
+    assert loaded["max_kappa"] == 10_000.0
 
 
 def test_save_json_uses_standard_artifact_filenames() -> None:

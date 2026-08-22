@@ -72,6 +72,7 @@ class GaussianLDATrainer:
         show_topics=None,
         cholesky_decomp=True,
         num_words_for_formatting=None,
+        prior_scale=0.1,
     ):
         """
 
@@ -177,7 +178,10 @@ class GaussianLDATrainer:
         )
 
         # Normal inverse wishart prior
-        self.prior = Wishart.from_word_vectors(self.vocab_embeddings)
+        self.prior = Wishart.from_word_vectors(
+            self.vocab_embeddings,
+            scale_sigma=prior_scale,
+        )
         self.training_corpus_encoding_sec = 0.0
         self.training_corpus_preencoded = False
 

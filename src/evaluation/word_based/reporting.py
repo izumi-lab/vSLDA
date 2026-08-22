@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from src.baselines.params import format_prior_scale_variant
 from src.core.result_identity import build_condition_id
-from src.evaluation.reporting import write_evaluation_json
+from src.evaluation.reporting import read_evaluation_json
+from src.evaluation.word_based.resumability import atomic_save_json
 from src.evaluation.word_based.topic_word_metrics import (
     EPSILON_SMOOTHED_COHERENCES,
     PALMETTO_CV_IMPLEMENTATION,
@@ -38,10 +41,16 @@ def build_output_condition_id(
     diversity_topn: int,
     coherence_split: str,
     topic_word_source: str,
-    proxy_npmi_mode: str,
-    proxy_word_score_mode: str,
     embedding_variant: str | None,
     metric_names: list[str],
+    dict_exclude_tokens: frozenset[str] = frozenset(),
+    posterior_settings: dict[str, object] | None = None,
+    topic_word_score_mode: str | None = None,
+    topic_word_ranking_schema_version: int | None = None,
+    prior_scale: float | None = None,
+    source_condition_id: str | None = None,
+    source_condition_fingerprint: str | None = None,
+    parameter_variant: str | None = None,
 ) -> tuple[str, str]:
     return build_condition_id(
         iteration=int(min(iterations)),
@@ -76,10 +85,16 @@ def build_output_condition_id(
             "diversity_topn": int(diversity_topn),
             "coherence_split": coherence_split,
             "topic_word_source": topic_word_source,
-            "proxy_npmi_mode": proxy_npmi_mode,
-            "proxy_word_score_mode": proxy_word_score_mode,
+            "topic_word_score_mode": topic_word_score_mode,
+            "topic_word_ranking_schema_version": topic_word_ranking_schema_version,
             "embedding_variant": embedding_variant,
             "metric_names": list(metric_names),
+            "dict_exclude_tokens": sorted(dict_exclude_tokens),
+            "posterior_settings": posterior_settings,
+            "prior_scale": prior_scale,
+            "source_condition_id": source_condition_id,
+            "source_condition_fingerprint": source_condition_fingerprint,
+            "parameter_variant": parameter_variant,
         },
         extra_labels=[
             model,
@@ -89,8 +104,16 @@ def build_output_condition_id(
                 else []
             ),
             *([embedding_variant] if embedding_variant else []),
+            *(
+                [format_prior_scale_variant(prior_scale)]
+                if prior_scale is not None
+                else []
+            ),
         ],
-        include_fingerprint=False,
+        # The fingerprint suffix keeps outputs from different settings (for
+        # example posterior configurations) in distinct directories so
+        # --skip-existing never reuses results computed under other settings.
+        include_fingerprint=True,
     )
 
 
@@ -113,14 +136,10 @@ def write_summary_outputs(
     coherence_metric: str,
     metric_names: list[str],
     summary_provenance: list[dict[str, object]],
+    failure_records: list[dict[str, object]] | None = None,
+    failure_checkpoint_root: Path | None = None,
 ) -> Path:
-    """Deprecated no-op for root-level word-based summary files.
-
-    The root-level summary_metrics.{csv,json} files were batch-local snapshots,
-    so partial reruns and skip-only runs could make them misleading. The
-    canonical outputs are the per-condition archive artifacts and latest
-    CURRENT.json pointers.
-    """
+    """Rebuild a durable condition index from atomically completed outputs."""
     _ = (
         summary_rows,
         dataset,
@@ -131,4 +150,84 @@ def write_summary_outputs(
         metric_names,
         summary_provenance,
     )
+    completed: list[dict[str, object]] = []
+    for completion_path in out_root.rglob("COMPLETE.json"):
+        relative_parts = completion_path.relative_to(out_root).parts
+        if any(part.startswith(".") for part in relative_parts):
+            continue
+        metrics_path = completion_path.parent / "metrics_agg.json"
+        if not metrics_path.exists():
+            continue
+        try:
+            meta, results = read_evaluation_json(metrics_path)
+        except (OSError, ValueError, TypeError):
+            continue
+        completed.append(
+            {
+                "dataset": meta.get("dataset"),
+                "data_run": meta.get("data_run"),
+                "model": meta.get("model"),
+                "category": meta.get("category"),
+                "num_topics": meta.get("num_topics"),
+                "iterations": meta.get("iterations"),
+                "condition_id": meta.get("condition_id"),
+                "condition_fingerprint": meta.get("condition_fingerprint"),
+                "metrics_path": str(metrics_path),
+                "aggregate": (
+                    results.get("aggregate") if isinstance(results, dict) else None
+                ),
+            }
+        )
+    completed.sort(
+        key=lambda row: (
+            str(row.get("dataset")),
+            str(row.get("data_run")),
+            str(row.get("model")),
+            str(row.get("category")),
+            str(row.get("num_topics")),
+            str(row.get("iterations")),
+        )
+    )
+    failures_by_key: dict[str, dict[str, object]] = {}
+    failure_root = (
+        (
+            failure_checkpoint_root
+            if failure_checkpoint_root is not None
+            else out_root / ".checkpoints"
+        )
+        / "failures"
+        / "v1"
+    )
+    if failure_root.exists():
+        for path in sorted(failure_root.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                normalized = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"schema", "schema_version", "identity"}
+                }
+                failures_by_key[
+                    json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+                ] = normalized
+    for failure in failure_records or []:
+        normalized = dict(failure)
+        failures_by_key[json.dumps(normalized, ensure_ascii=False, sort_keys=True)] = (
+            normalized
+        )
+    failures = list(failures_by_key.values())
+    atomic_save_json(
+        {
+            "schema": "word_based_condition_index",
+            "schema_version": 1,
+            "completed_count": len(completed),
+            "failed_count": len(failures),
+            "completed": completed,
+        },
+        out_root / "condition_index.json",
+    )
+    atomic_save_json(failures, out_root / "failed_conditions.json")
     return out_root

@@ -127,6 +127,15 @@ def test_build_component_display_keys_use_k_iteration_component_order() -> None:
         )
         == "k5_it1_c2"
     )
+    assert (
+        build_baseline_display_key(
+            iteration=0,
+            num_topics=10,
+            embedding_variant="googlenews300",
+            parameter_variant="psi0-0p1",
+        )
+        == "k10_it0_googlenews300_psi0-0p1"
+    )
 
 
 def test_build_archive_result_dir_uses_date_and_execution_id() -> None:
@@ -1013,6 +1022,62 @@ def test_resolve_baseline_condition_dir_prefers_latest_pointer(tmp_path: Path) -
     ).exists()
 
 
+def test_prior_scale_point_one_resolves_legacy_suffixless_pointer(
+    tmp_path: Path,
+) -> None:
+    archive_dir = build_baseline_archive_dir(
+        model="gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        embedding_variant="googlenews300",
+        started_at="2026-04-10T02:15:30+00:00",
+        execution_id="baseline_20260410T021530Z",
+        baseline_root=tmp_path,
+    )
+    (archive_dir / "params").mkdir(parents=True)
+    save_json(
+        {
+            "iteration": 0,
+            "num_topics": 10,
+            "category": "science",
+            "data_run": "default",
+        },
+        archive_dir / "metadata.json",
+    )
+    write_baseline_latest_pointer(
+        model="gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        archive_dir=archive_dir,
+        embedding_variant="googlenews300",
+        started_at="2026-04-10T02:15:30+00:00",
+        execution_id="baseline_20260410T021530Z",
+        condition_fingerprint="legacy",
+        artifacts={"metadata": "metadata.json"},
+        baseline_root=tmp_path,
+    )
+
+    resolved = resolve_baseline_condition_dir(
+        model="gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        embedding_variant="googlenews300",
+        parameter_variant="psi0-0p1",
+        baseline_root=tmp_path,
+    )
+
+    assert resolved == archive_dir
+
+
 def test_resolve_mvtm_condition_dir_prefers_component_latest_pointer(
     tmp_path: Path,
 ) -> None:
@@ -1192,3 +1257,59 @@ def test_resolve_baseline_condition_dir_requires_variant_when_multiple_match(
             category="all",
             baseline_root=tmp_path,
         )
+
+
+def test_resolve_gaussian_condition_dir_finds_parameter_variant_without_being_told(
+    tmp_path: Path,
+) -> None:
+    """Callers that only know the embedding variant must still find the pointer.
+
+    Gaussian-family latest dirs always carry a `_psi0-*` suffix now, but
+    geometry-based metrics and the word-based model inputs resolve with an
+    embedding variant alone. An exact-name match would miss the suffixed
+    directory and fall through to the ambiguous unique-condition scan.
+    """
+
+    archive_dir = build_baseline_archive_dir(
+        model="sentence_gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        embedding_variant="mpnet_raw",
+        parameter_variant="psi0-0p1",
+        started_at="2026-04-10T02:15:30+00:00",
+        execution_id="baseline_20260410T021530Z",
+        baseline_root=tmp_path,
+    )
+    (archive_dir / "params").mkdir(parents=True)
+    write_baseline_latest_pointer(
+        model="sentence_gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        archive_dir=archive_dir,
+        embedding_variant="mpnet_raw",
+        parameter_variant="psi0-0p1",
+        started_at="2026-04-10T02:15:30+00:00",
+        execution_id="baseline_20260410T021530Z",
+        condition_fingerprint="fingerprint",
+        artifacts={"metadata": "metadata.json"},
+        baseline_root=tmp_path,
+    )
+
+    resolved = resolve_baseline_condition_dir(
+        model="sentence_gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="science",
+        iteration=0,
+        num_topics=10,
+        embedding_variant="mpnet_raw",
+        baseline_root=tmp_path,
+    )
+
+    assert resolved == archive_dir

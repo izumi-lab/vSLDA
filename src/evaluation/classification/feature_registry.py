@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from src.baselines.params import format_prior_scale_variant
 from src.core.artifacts import (
     CURRENT_POINTER_FILENAME,
     METADATA_FILENAME,
@@ -23,6 +24,10 @@ from src.core.paths import (
     resolve_vmf_experiment_dir,
 )
 from src.data.preprocessing import PreprocessedDocument
+from src.data.preprocessing_selection import (
+    parse_raw_doc_indices,
+    resolve_preprocessing_selection,
+)
 
 from .alignment import (
     SplitAlignment,
@@ -99,9 +104,28 @@ def resolve_feature_catalog_entry(
             "display_key": display_key,
             "embedding_variant": embedding_variant,
             "condition_fingerprint": condition_fingerprint,
+            "source_condition_id": display_key,
+            "source_condition_fingerprint": condition_fingerprint,
+            "prior_scale": None,
             "encoder_config": encoder_config,
         }
 
+    baseline_params = (
+        dict(metadata["baseline_params"])
+        if isinstance(metadata.get("baseline_params"), dict)
+        else None
+    )
+    source_condition_id = metadata.get("condition_id") or display_key
+    source_condition_fingerprint = (
+        condition_fingerprint or _metadata_condition_fingerprint(metadata)
+    )
+    prior_scale = None
+    if spec.model_key in {"gaussianlda", "sentence_gaussianlda"}:
+        prior_scale = (
+            baseline_params.get("prior_scale", 0.1)
+            if baseline_params is not None
+            else 0.1
+        )
     return {
         "feature_name": feature_name,
         "display_name": spec.display_name,
@@ -110,15 +134,13 @@ def resolve_feature_catalog_entry(
         "runner_family": metadata.get("runner_family", spec.model_key),
         "parameter_variant": metadata.get("parameter_variant"),
         "preprocessing_variant": metadata.get("preprocessing_variant"),
-        "baseline_params": (
-            dict(metadata["baseline_params"])
-            if isinstance(metadata.get("baseline_params"), dict)
-            else None
-        ),
+        "baseline_params": baseline_params,
         "display_key": display_key or _metadata_display_key(metadata),
         "embedding_variant": embedding_variant or _metadata_embedding_variant(metadata),
-        "condition_fingerprint": condition_fingerprint
-        or _metadata_condition_fingerprint(metadata),
+        "condition_fingerprint": source_condition_fingerprint,
+        "source_condition_id": source_condition_id,
+        "source_condition_fingerprint": source_condition_fingerprint,
+        "prior_scale": prior_scale,
         "encoder_config": encoder_config or _metadata_encoder_config(metadata),
     }
 
@@ -347,6 +369,38 @@ def _variant_value_matches(*, value: str, requested: str) -> bool:
         or value.startswith(f"{requested}_")
         or value.endswith(f"_{requested}")
     )
+
+
+def _prior_scale_matches(
+    *,
+    model_key: str,
+    pointer_payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    prior_scale: float | None,
+) -> bool:
+    if prior_scale is None or model_key not in {
+        "gaussianlda",
+        "sentence_gaussianlda",
+    }:
+        return True
+
+    expected = format_prior_scale_variant(prior_scale)
+    parameter_variant = pointer_payload.get("parameter_variant")
+    if parameter_variant is not None:
+        return str(parameter_variant) == expected
+
+    baseline_params = metadata.get("baseline_params")
+    if isinstance(baseline_params, Mapping) and "prior_scale" in baseline_params:
+        try:
+            return (
+                format_prior_scale_variant(float(baseline_params["prior_scale"]))
+                == expected
+            )
+        except (TypeError, ValueError):
+            return False
+
+    # Artifacts created before prior-scale path variants were introduced used 0.1.
+    return expected == "psi0-0p1"
 
 
 def _pointer_metadata_matches(
@@ -642,6 +696,7 @@ def _resolve_latest_feature_artifacts(
     vmf_assignment: str,
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
+    prior_scale: float | None,
 ) -> list[ResolvedFeatureArtifact]:
     latest_root = _latest_root_for_spec(
         model_key=spec.model_key,
@@ -682,6 +737,13 @@ def _resolve_latest_feature_artifacts(
             iteration=iteration,
             num_topics=num_topics,
             embedding_variants=embedding_variants,
+        ):
+            continue
+        if not _prior_scale_matches(
+            model_key=spec.model_key,
+            pointer_payload=pointer_payload,
+            metadata=metadata,
+            prior_scale=prior_scale,
         ):
             continue
         artifact_pair = _resolve_pointer_artifact_pair(
@@ -737,6 +799,22 @@ def _resolve_latest_feature_artifacts(
                 f"{spec.model_key}: {invalid_matches}"
             ),
         )
+    if prior_scale is not None and spec.model_key in {
+        "gaussianlda",
+        "sentence_gaussianlda",
+    }:
+        expected_variant = format_prior_scale_variant(prior_scale)
+        preferred = [
+            artifact
+            for artifact in resolved
+            if (
+                artifact.display_key is not None
+                and artifact.display_key.endswith(f"_{expected_variant}")
+            )
+            or artifact.metadata.get("parameter_variant") == expected_variant
+        ]
+        if preferred:
+            return preferred
     return resolved
 
 
@@ -1186,19 +1264,14 @@ def _selection_alignment_from_artifacts(
             _split_alignment_from_selection_payload(
                 load_artifact_json(train_selection_path),
                 split_key="train",
+                selection_path=train_selection_path,
             ),
             _split_alignment_from_selection_payload(
                 load_artifact_json(test_selection_path),
                 split_key="test",
+                selection_path=test_selection_path,
             ),
         )
-    if train_selection_path.exists() and train_selection_path == test_selection_path:
-        payload = load_artifact_json(train_selection_path)
-        if isinstance(payload, Mapping) and "train" in payload and "test" in payload:
-            return (
-                _split_alignment_from_selection_payload(payload, split_key="train"),
-                _split_alignment_from_selection_payload(payload, split_key="test"),
-            )
     return None
 
 
@@ -1206,15 +1279,15 @@ def _split_alignment_from_selection_payload(
     payload: object,
     *,
     split_key: str,
+    selection_path: Path,
 ) -> SplitAlignment:
-    if isinstance(payload, Mapping) and split_key in payload:
-        payload = payload[split_key]
-    if not isinstance(payload, Mapping):
-        raise ValueError("Invalid preprocessing selection artifact payload.")
-    raw_doc_indices = payload.get("raw_doc_indices")
-    if not isinstance(raw_doc_indices, list):
-        raise ValueError("preprocessing_selection.json is missing raw_doc_indices.")
-    available = np.asarray([int(index) for index in raw_doc_indices], dtype=int)
+    selection = resolve_preprocessing_selection(
+        payload, split=split_key, selection_path=selection_path
+    )
+    raw_doc_indices = parse_raw_doc_indices(
+        selection, selection_path=selection_path, split=split_key
+    )
+    available = np.asarray(raw_doc_indices, dtype=int)
     return SplitAlignment(raw_indices=available.copy(), available_indices=available)
 
 
@@ -1279,6 +1352,7 @@ def iter_available_features(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> list[tuple[FeatureSpec, Path, Path]]:
     if feature_resolve_mode not in {"all", "strict"}:
         raise ValueError(f"Unknown feature_resolve_mode: {feature_resolve_mode}")
@@ -1306,6 +1380,7 @@ def iter_available_features(
             vmf_assignment=vmf_assignment,
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
+            prior_scale=prior_scale,
         )
         if latest_artifacts:
             for artifact in latest_artifacts:
@@ -1318,6 +1393,13 @@ def iter_available_features(
                 resolved_features.append(
                     (resolved_spec, artifact.train_path, artifact.test_path)
                 )
+            continue
+
+        if (
+            prior_scale is not None
+            and spec.model_key in {"gaussianlda", "sentence_gaussianlda"}
+            and format_prior_scale_variant(prior_scale) != "psi0-0p1"
+        ):
             continue
 
         try:

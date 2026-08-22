@@ -39,6 +39,13 @@ from .config_schema import (
     VmfInferenceConfig,
 )
 
+# Baseline runners whose topic parameters live in a pretrained word-vector space.
+WORD_EMBEDDING_RUNNERS = {
+    "gaussianlda",
+    "etm",
+    "mvtm",
+}
+
 
 def apply_encoder_overrides(
     raw_cfg: dict,
@@ -58,11 +65,56 @@ def apply_encoder_overrides(
     return cfg
 
 
+def apply_gaussian_prior_scale_override(
+    raw_cfg: dict,
+    *,
+    prior_scale: float | None = None,
+) -> dict:
+    if prior_scale is None:
+        return raw_cfg
+    cfg = dict(raw_cfg)
+    baselines = []
+    for raw_baseline in cfg.get("baselines", []):
+        baseline = dict(raw_baseline)
+        if str(baseline.get("runner", "")).strip().lower() in {
+            "gaussianlda",
+            "sentence_gaussianlda",
+        }:
+            params = dict(baseline.get("params") or {})
+            params["prior_scale"] = float(prior_scale)
+            baseline["params"] = params
+        baselines.append(baseline)
+    cfg["baselines"] = baselines
+    return cfg
+
+
+def apply_word2vec_override(
+    raw_cfg: dict,
+    *,
+    word2vec: str | None = None,
+) -> dict:
+    if word2vec is None:
+        return raw_cfg
+    cfg = dict(raw_cfg)
+    baselines = []
+    for raw_baseline in cfg.get("baselines", []):
+        baseline = dict(raw_baseline)
+        if str(baseline.get("runner", "")).strip().lower() in WORD_EMBEDDING_RUNNERS:
+            params = dict(baseline.get("params") or {})
+            params["word2vec"] = str(word2vec)
+            baseline["params"] = params
+        baselines.append(baseline)
+    cfg["baselines"] = baselines
+    return cfg
+
+
 def load_config(
     path: str | Path,
     *,
     encoder_model: str | None = None,
     strip_terminal_normalize: bool | None = None,
+    prior_scale: float | None = None,
+    word2vec: str | None = None,
 ) -> ComparisonConfig:
     cfg = load_config_yaml_resolved(path)
     cfg = apply_encoder_overrides(
@@ -70,6 +122,8 @@ def load_config(
         encoder_model=encoder_model,
         strip_terminal_normalize=strip_terminal_normalize,
     )
+    cfg = apply_gaussian_prior_scale_override(cfg, prior_scale=prior_scale)
+    cfg = apply_word2vec_override(cfg, word2vec=word2vec)
     preset = validate_preset_config(cfg)
     dataset = parse_dataset_config(cfg)
     train = parse_train_config(cfg)

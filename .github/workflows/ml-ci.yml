@@ -26,4 +26,4 @@ jobs:
       - name: Install NLTK data
         run: poetry run setup-nltk
       - name: Pytest
-        run: poetry run pytest -q -m "slow or integration"
+        run: poetry run pytest -q

@@ -48,6 +48,9 @@ packages = [
     { include = "scripts" },
 ]
 
+[tool.poetry.group.ml]
+optional = true
+
 [dependency-groups]
 dev = [
     "black (>=25.11.0,<26.0.0)",

@@ -54,7 +54,7 @@ def _doc(tokens: list[str]) -> PreprocessedDocument:
 def test_parse_etm_params_defaults_and_validation() -> None:
     params = parse_etm_params({})
 
-    assert params.word2vec == "glove-wiki-gigaword-100"
+    assert params.word2vec == "word2vec-google-news-300"
     assert params.num_epochs == 100
     assert params.batch_size == 128
     assert params.lr == pytest.approx(0.002)

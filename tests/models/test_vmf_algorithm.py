@@ -4,6 +4,7 @@ import logging
 import math
 
 import numpy as np
+import pytest
 from scipy.special import digamma, ive, logsumexp
 
 from src.core.progress import NullProgressReporter
@@ -89,6 +90,8 @@ def _make_trainer(
     num_topics: int,
     num_components: int,
     dim: int = 3,
+    kappa: float = 2.0,
+    max_kappa: float = 10_000.0,
 ) -> VMFLDATrainer:
     mapping = {
         "a": _normalize(np.array([1.0, 0.0, 0.0])),
@@ -100,11 +103,92 @@ def _make_trainer(
         encoder=_FixedEncoder(mapping, dim=dim),
         num_topics=num_topics,
         alpha=1.0,
-        kappa=2.0,
+        kappa=kappa,
+        max_kappa=max_kappa,
         num_components=num_components,
         pre_normalize_transform="none",
         log=logging.getLogger("test-vmf-algorithm"),
         progress=NullProgressReporter(),
+    )
+
+
+@pytest.mark.parametrize("max_kappa", [0.0, -1.0, np.nan, np.inf])
+def test_trainer_rejects_invalid_max_kappa(max_kappa: float) -> None:
+    with pytest.raises(ValueError, match="max_kappa"):
+        _make_trainer(
+            num_topics=2,
+            num_components=1,
+            max_kappa=max_kappa,
+        )
+
+
+def test_trainer_rejects_default_kappa_above_maximum() -> None:
+    with pytest.raises(ValueError, match="kappa must be <= max_kappa"):
+        _make_trainer(
+            num_topics=2,
+            num_components=1,
+            kappa=6.0,
+            max_kappa=5.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("estimate", "expected"),
+    [
+        (3.0, 3.0),
+        (8.0, 5.0),
+        (0.0, 2.0),
+        (-1.0, 2.0),
+        (np.nan, 2.0),
+        (np.inf, 2.0),
+    ],
+)
+def test_sanitize_kappa_estimate_bounds_or_falls_back(
+    estimate: float,
+    expected: float,
+) -> None:
+    trainer = _make_trainer(
+        num_topics=2,
+        num_components=1,
+        kappa=2.0,
+        max_kappa=5.0,
+    )
+
+    assert trainer._sanitize_kappa_estimate(estimate) == expected
+
+
+@pytest.mark.parametrize("num_components", [1, 2])
+def test_m_step_clips_kappa_and_records_topics(num_components: int) -> None:
+    trainer = _make_trainer(
+        num_topics=2,
+        num_components=num_components,
+        max_kappa=5.0,
+    )
+    nk = np.full(2, 2.0, dtype=np.float64)
+    nk_comp = np.full((2, num_components), 2.0 / num_components)
+    r = np.zeros((2, num_components, trainer.embedding_size), dtype=np.float64)
+    for topic_id in range(2):
+        for component_id in range(num_components):
+            r[topic_id, component_id, topic_id] = 2.0 / num_components
+
+    trainer._apply_m_step_updates(nk=nk, nk_comp=nk_comp, r=r)
+
+    np.testing.assert_array_equal(trainer.kappa_per_topic, [5.0, 5.0])
+    assert trainer._last_estimated_kappa_max is not None
+    assert trainer._last_estimated_kappa_max > trainer.max_kappa
+    assert trainer._last_clipped_topic_ids == [0, 1]
+    assert trainer.assert_valid_state().kappa_within_bound is True
+    np.testing.assert_allclose(
+        trainer._scaled_topic_means,
+        trainer.max_kappa * trainer.topic_means,
+    )
+    np.testing.assert_allclose(
+        trainer._scaled_component_means,
+        trainer.max_kappa * trainer.component_means,
+    )
+    np.testing.assert_allclose(
+        trainer._log_c_per_topic,
+        trainer._log_vmf_normalization_const(trainer.kappa_per_topic),
     )
 
 

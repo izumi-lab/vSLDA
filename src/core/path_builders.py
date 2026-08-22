@@ -42,6 +42,7 @@ def _build_component_display_key(
     num_topics: int,
     num_components: int | None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
 ) -> str:
     base_key = build_result_display_key(num_topics=num_topics, iteration=iteration)
     if num_components is None:
@@ -49,7 +50,9 @@ def _build_component_display_key(
     else:
         display_key = f"{base_key}_c{int(num_components)}"
     if embedding_variant:
-        return f"{display_key}_{embedding_variant}"
+        display_key = f"{display_key}_{embedding_variant}"
+    if parameter_variant:
+        display_key = f"{display_key}_{parameter_variant}"
     return display_key
 
 
@@ -74,12 +77,14 @@ def build_baseline_display_key(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
 ) -> str:
     return _build_component_display_key(
         iteration=iteration,
         num_topics=num_topics,
         num_components=num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
     )
 
 
@@ -168,6 +173,7 @@ def build_baseline_latest_dir(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     baseline_root: Path | None = None,
 ) -> Path:
     return (
@@ -184,6 +190,7 @@ def build_baseline_latest_dir(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         )
     )
 
@@ -198,6 +205,7 @@ def build_baseline_archive_dir(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     started_at: str | None = None,
     execution_id: str | None = None,
     baseline_root: Path | None = None,
@@ -218,6 +226,7 @@ def build_baseline_archive_dir(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         )
         / resolved_execution_id
     )

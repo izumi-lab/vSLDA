@@ -3,7 +3,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from gensim.corpora import Dictionary
@@ -33,7 +33,6 @@ ModelType = Literal[
     "movmf",
     "gaussian_mixture",
 ]
-ScoreMode = Literal["npmi", "word_npmi"]
 TopicWord = tuple[str, float]
 TopicWords = list[list[TopicWord]]
 
@@ -44,14 +43,7 @@ class TopicWordsResult:
     topic_word_source: str
     score_mode: str | None = None
     score_definition: str | None = None
-
-
-def describe_proxy_word_score_mode(score_mode: ScoreMode) -> str:
-    if score_mode == "npmi":
-        return "PMI normalized by -log p(w,k)"
-    if score_mode == "word_npmi":
-        return "PMI normalized by -log p(w)"
-    raise ValueError(f"Unsupported proxy word score mode '{score_mode}'.")
+    runtime_payload: Any | None = None
 
 
 def build_baseline_param_dir(
@@ -93,137 +85,6 @@ def build_baseline_param_dir(
     )
 
 
-def compute_topic_word_npmi(
-    doc_topics: np.ndarray,
-    corpus_bow: list[list[tuple[int, int]]],
-    vocab_size: int,
-    eps: float = 1e-12,
-    score_mode: ScoreMode = "npmi",
-) -> np.ndarray:
-    if doc_topics.shape[0] != len(corpus_bow):
-        raise ValueError(
-            f"doc_topics size {doc_topics.shape[0]} does not match corpus size {len(corpus_bow)}"
-        )
-    num_topics = doc_topics.shape[1]
-    joint_counts = np.zeros((num_topics, vocab_size), dtype=np.float64)
-    word_counts = np.zeros(vocab_size, dtype=np.float64)
-    topic_counts = np.zeros(num_topics, dtype=np.float64)
-    total_tokens = 0.0
-
-    for doc_idx, bow in enumerate(corpus_bow):
-        if not bow:
-            continue
-        theta = doc_topics[doc_idx]
-        doc_len = 0.0
-        for word_id, count in bow:
-            weight = float(count)
-            doc_len += weight
-            word_counts[word_id] += weight
-            joint_counts[:, word_id] += theta * weight
-        topic_counts += theta * doc_len
-        total_tokens += doc_len
-
-    if total_tokens == 0.0:
-        return np.zeros_like(joint_counts)
-
-    p_wk = joint_counts / total_tokens
-    p_w = word_counts / total_tokens
-    p_k = topic_counts / total_tokens
-
-    denom = np.outer(p_k, p_w)
-    p_wk_safe = np.maximum(p_wk, eps)
-    denom_safe = np.maximum(denom, eps)
-    pmi = np.log(p_wk_safe / denom_safe)
-    if score_mode == "npmi":
-        normalizer = -np.log(p_wk_safe)
-    elif score_mode == "word_npmi":
-        normalizer = -np.log(np.maximum(p_w, eps))[None, :]
-    else:
-        raise ValueError(f"Unsupported proxy word score mode '{score_mode}'.")
-    scores = pmi / normalizer
-    scores[p_wk == 0.0] = -1.0
-    return scores
-
-
-def compute_topic_word_npmi_from_sentence_topics(
-    sentence_topics_by_doc: list[np.ndarray],
-    sentence_bow_by_doc: list[list[list[tuple[int, int]]]],
-    num_topics: int,
-    vocab_size: int,
-    eps: float = 1e-12,
-    score_mode: ScoreMode = "npmi",
-) -> np.ndarray:
-    if len(sentence_topics_by_doc) != len(sentence_bow_by_doc):
-        raise ValueError(
-            f"sentence_topics docs={len(sentence_topics_by_doc)} != sentence_bow docs={len(sentence_bow_by_doc)}"
-        )
-
-    joint_counts = np.zeros((num_topics, vocab_size), dtype=np.float64)
-    word_counts = np.zeros(vocab_size, dtype=np.float64)
-    topic_counts = np.zeros(num_topics, dtype=np.float64)
-    total_tokens = 0.0
-
-    for doc_idx, (sentence_topics, sentence_bows) in enumerate(
-        zip(sentence_topics_by_doc, sentence_bow_by_doc)
-    ):
-        if sentence_topics.shape[0] != len(sentence_bows):
-            topic_len = int(sentence_topics.shape[0])
-            bow_len = int(len(sentence_bows))
-            if bow_len < topic_len:
-                sentence_bows = list(sentence_bows) + [
-                    [] for _ in range(topic_len - bow_len)
-                ]
-                warnings.warn(
-                    "Sentence count mismatch resolved by padding empty sentence BoW: "
-                    f"doc={doc_idx}, sentence_topics={topic_len}, sentence_bows={bow_len}"
-                )
-            else:
-                sentence_bows = list(sentence_bows[:topic_len])
-                warnings.warn(
-                    "Sentence count mismatch resolved by truncating sentence BoW: "
-                    f"doc={doc_idx}, sentence_topics={topic_len}, sentence_bows={bow_len}"
-                )
-        if sentence_topics.shape[1] != num_topics:
-            raise ValueError(
-                f"Topic count mismatch at doc {doc_idx}: "
-                f"sentence_topics has {sentence_topics.shape[1]}, expected {num_topics}"
-            )
-
-        for sent_idx, bow in enumerate(sentence_bows):
-            if not bow:
-                continue
-            theta = sentence_topics[sent_idx]
-            sent_len = 0.0
-            for word_id, count in bow:
-                weight = float(count)
-                sent_len += weight
-                word_counts[word_id] += weight
-                joint_counts[:, word_id] += theta * weight
-            topic_counts += theta * sent_len
-            total_tokens += sent_len
-
-    if total_tokens == 0.0:
-        return np.zeros_like(joint_counts)
-
-    p_wk = joint_counts / total_tokens
-    p_w = word_counts / total_tokens
-    p_k = topic_counts / total_tokens
-
-    denom = np.outer(p_k, p_w)
-    p_wk_safe = np.maximum(p_wk, eps)
-    denom_safe = np.maximum(denom, eps)
-    pmi = np.log(p_wk_safe / denom_safe)
-    if score_mode == "npmi":
-        normalizer = -np.log(p_wk_safe)
-    elif score_mode == "word_npmi":
-        normalizer = -np.log(np.maximum(p_w, eps))[None, :]
-    else:
-        raise ValueError(f"Unsupported proxy word score mode '{score_mode}'.")
-    scores = pmi / normalizer
-    scores[p_wk == 0.0] = -1.0
-    return scores
-
-
 def select_top_words(
     scores: np.ndarray,
     dictionary: Dictionary,
@@ -238,7 +99,7 @@ def select_top_words(
         if not np.any(row):
             topic_words.append([])
             continue
-        top_ids = np.argsort(-row)[:topn]
+        top_ids = np.argsort(-row, kind="stable")[:topn]
         topic_words.append(
             [(dictionary[word_id], float(row[word_id])) for word_id in top_ids]
         )
@@ -264,7 +125,7 @@ def select_top_words_from_vocab_scores(
         if not np.any(row):
             topic_words.append([])
             continue
-        top_ids = np.argsort(-row)[:topn]
+        top_ids = np.argsort(-row, kind="stable")[:topn]
         topic_words.append(
             [(vocab[word_id], float(row[word_id])) for word_id in top_ids]
         )
@@ -392,16 +253,16 @@ def load_bleilda_topic_words(
     return select_top_words_from_vocab_scores(scores=scores, vocab=vocab, topn=topn)
 
 
-def load_ctm_topic_words(
+def load_ctm_decoder_scores(
     dataset: str,
     iteration: int,
     num_topics: int,
     category: str,
-    topn: int,
-    dictionary: Dictionary | None = None,
     data_run: str = "default",
     embedding_variant: str | None = None,
-) -> TopicWords:
+) -> tuple[np.ndarray, list[str]]:
+    """Load the fitted CTM decoder topic-word matrix and its model vocabulary."""
+
     _patch_torch_for_ctm_loading()
     from contextualized_topic_models.models.ctm import CombinedTM
 
@@ -436,7 +297,27 @@ def load_ctm_topic_words(
         scores = scores.T
     if scores.shape[0] != num_topics:
         raise ValueError(f"Unexpected CTM topic-word shape: {scores.shape}")
-    vocab = [str(word) for word in tp.vocab]
+    return scores, [str(word) for word in tp.vocab]
+
+
+def load_ctm_topic_words(
+    dataset: str,
+    iteration: int,
+    num_topics: int,
+    category: str,
+    topn: int,
+    dictionary: Dictionary | None = None,
+    data_run: str = "default",
+    embedding_variant: str | None = None,
+) -> TopicWords:
+    scores, vocab = load_ctm_decoder_scores(
+        dataset=dataset,
+        iteration=iteration,
+        num_topics=num_topics,
+        category=category,
+        data_run=data_run,
+        embedding_variant=embedding_variant,
+    )
     if dictionary is not None:
         return select_top_words_from_vocab_scores_restricted_to_dictionary(
             scores=scores,
@@ -551,7 +432,7 @@ def load_gaussianlda_topic_words(
                 ]
             )
         else:
-            top_ids = np.argsort(-row)[:topn]
+            top_ids = np.argsort(-row, kind="stable")[:topn]
             topic_words.append(
                 [(vocab[word_id], float(row[word_id])) for word_id in top_ids]
             )
@@ -789,50 +670,4 @@ def extract_topic_words_from_learned_model(
             embedding_variant=embedding_variant,
         ),
         topic_word_source="learned_topic_word_distribution",
-    )
-
-
-def extract_topic_words_from_doc_topic_npmi(
-    *,
-    doc_topics: np.ndarray,
-    corpus_bow: list[list[tuple[int, int]]],
-    dictionary: Dictionary,
-    topn: int,
-    score_mode: ScoreMode = "npmi",
-) -> TopicWordsResult:
-    scores = compute_topic_word_npmi(
-        doc_topics=doc_topics,
-        corpus_bow=corpus_bow,
-        vocab_size=len(dictionary),
-        score_mode=score_mode,
-    )
-    return TopicWordsResult(
-        topic_words=select_top_words(scores=scores, dictionary=dictionary, topn=topn),
-        topic_word_source="document_topic_proxy_npmi",
-        score_mode=score_mode,
-        score_definition=describe_proxy_word_score_mode(score_mode),
-    )
-
-
-def extract_topic_words_from_sentence_topic_npmi(
-    *,
-    sentence_topics_by_doc: list[np.ndarray],
-    sentence_bow_by_doc: list[list[list[tuple[int, int]]]],
-    num_topics: int,
-    dictionary: Dictionary,
-    topn: int,
-    score_mode: ScoreMode = "npmi",
-) -> TopicWordsResult:
-    scores = compute_topic_word_npmi_from_sentence_topics(
-        sentence_topics_by_doc=sentence_topics_by_doc,
-        sentence_bow_by_doc=sentence_bow_by_doc,
-        num_topics=num_topics,
-        vocab_size=len(dictionary),
-        score_mode=score_mode,
-    )
-    return TopicWordsResult(
-        topic_words=select_top_words(scores=scores, dictionary=dictionary, topn=topn),
-        topic_word_source="sentence_topic_proxy_npmi",
-        score_mode=score_mode,
-        score_definition=describe_proxy_word_score_mode(score_mode),
     )

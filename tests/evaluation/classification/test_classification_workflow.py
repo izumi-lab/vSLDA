@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
+
 from src.core.artifacts import load_json
 from src.core.paths_roots import resolve_project_path
 from src.evaluation.classification.workflow import (
@@ -280,6 +282,26 @@ def test_build_classification_write_spec_uses_archive_and_latest_layout(
             display_key="svm_soft_k10_it0",
         )
     )
+
+
+def test_classification_condition_identity_includes_prior_scale() -> None:
+    base = dict(
+        dataset="dummy",
+        topics=10,
+        iteration=0,
+        classifiers=["logreg"],
+        vmf_assignment="hard",
+        target_column="target_str",
+        label_schema="identity",
+        selected_models=["gaussianlda"],
+    )
+    point_one = ClassificationCondition(**base, prior_scale=0.1)
+    three = ClassificationCondition(**base, prior_scale=3.0)
+
+    assert point_one.display_key().endswith("psi0-0p1_k10_it0")
+    assert three.display_key().endswith("psi0-3_k10_it0")
+    assert point_one.condition_id()[1] != three.condition_id()[1]
+    assert point_one.meta()["prior_scale"] == pytest.approx(0.1)
 
 
 def test_limited_classification_condition_records_sampling_repeat() -> None:

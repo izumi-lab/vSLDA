@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from src.baselines.params import normalize_baseline_params
 from src.core.paths import resolve_project_path
 from src.data.text_processing import normalize_segmenter_name, normalize_tokenizer_name
@@ -170,6 +172,7 @@ def parse_train_config(raw_cfg: Dict[str, Any]) -> TrainConfig:
         num_iterations=int(train_cfg["num_iterations"]),
         alpha=alpha,
         kappa_default=float(train_cfg.get("kappa_default", 10.0)),
+        max_kappa=float(train_cfg.get("max_kappa", 10_000.0)),
         num_components=int(train_cfg.get("num_components", 1)),
         gibbs_sweeps=gibbs_sweeps,
         num_samples=num_samples,
@@ -185,6 +188,12 @@ def parse_train_config(raw_cfg: Dict[str, Any]) -> TrainConfig:
     )
     if train.num_components < 1:
         raise ValueError("train.num_components must be >= 1.")
+    if not np.isfinite(train.max_kappa) or train.max_kappa <= 0.0:
+        raise ValueError("train.max_kappa must be finite and > 0.")
+    if not np.isfinite(train.kappa_default) or train.kappa_default <= 0.0:
+        raise ValueError("train.kappa_default must be finite and > 0.")
+    if train.kappa_default > train.max_kappa:
+        raise ValueError("train.kappa_default must be <= train.max_kappa.")
     if train.alpha_min_value <= 0.0:
         raise ValueError("train.alpha_min_value must be > 0.")
     if train.min_topic_count_for_repair < 1:

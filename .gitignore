@@ -177,6 +177,8 @@ cython_debug/
 /scripts/*
 !/scripts/__init__.py
 !/scripts/setup_nltk.py
+/tests/scripts/*
+!/tests/scripts/test_setup_nltk.py
 /choldate/
 /tmp/
 /old_*/

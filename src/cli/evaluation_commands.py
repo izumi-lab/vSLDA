@@ -5,6 +5,7 @@ from typing import Optional
 
 import typer
 
+from src.baselines.params import format_prior_scale_variant
 from src.core.paths import CLASSIFICATION_RESULTS_ROOT
 from src.evaluation.classification.config import (
     ALIGNMENT_MODES,
@@ -39,6 +40,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         alignment_mode: str = typer.Option(DEFAULT_ALIGNMENT_MODE, "--alignment-mode"),
         embedding_variant: list[str] = typer.Option([], "--embedding-variant"),
         model: list[str] = typer.Option([], "--model"),
+        prior_scale: Optional[float] = typer.Option(None, "--prior-scale", min=0.0),
         feature_resolve_mode: str = typer.Option(
             DEFAULT_FEATURE_RESOLVE_MODE,
             "--feature-resolve-mode",
@@ -46,6 +48,11 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
     ) -> None:
         from src.evaluation.registry import register_builtin_tasks, run_task
 
+        if prior_scale is not None:
+            try:
+                format_prior_scale_variant(prior_scale)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--prior-scale") from exc
         if alignment_mode not in ALIGNMENT_MODES:
             raise typer.BadParameter(
                 f"alignment mode must be one of {', '.join(ALIGNMENT_MODES)}"
@@ -73,6 +80,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             embedding_variants=list(embedding_variant) or None,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=list(model) or None,
+            prior_scale=prior_scale,
         )
 
     @evaluation_app.command(
@@ -132,6 +140,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         alignment_mode: str = typer.Option(DEFAULT_ALIGNMENT_MODE, "--alignment-mode"),
         embedding_variant: list[str] = typer.Option([], "--embedding-variant"),
         model: list[str] = typer.Option([], "--model"),
+        prior_scale: Optional[float] = typer.Option(None, "--prior-scale", min=0.0),
         feature_resolve_mode: str = typer.Option(
             DEFAULT_FEATURE_RESOLVE_MODE,
             "--feature-resolve-mode",
@@ -140,6 +149,11 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         from src.cli.workflows import resolve_limited_classification_setting
         from src.evaluation.registry import register_builtin_tasks, run_task
 
+        if prior_scale is not None:
+            try:
+                format_prior_scale_variant(prior_scale)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--prior-scale") from exc
         try:
             mode, value = resolve_limited_classification_setting(
                 ratio=ratio, count=count
@@ -181,6 +195,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             embedding_variants=list(embedding_variant) or None,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=list(model) or None,
+            prior_scale=prior_scale,
         )
 
     @evaluation_app.command(
@@ -208,6 +223,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         embedding_variant: list[str] = typer.Option([], "--embedding-variant"),
         model: list[str] = typer.Option([], "--model"),
         exclude_category: list[str] = typer.Option([], "--exclude-category"),
+        prior_scale: Optional[float] = typer.Option(None, "--prior-scale", min=0.0),
         include_all_category: bool = typer.Option(False, "--include-all-category"),
         feature_resolve_mode: str = typer.Option(
             DEFAULT_FEATURE_RESOLVE_MODE,
@@ -222,6 +238,11 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
     ) -> None:
         from src.evaluation.registry import register_builtin_tasks, run_task
 
+        if prior_scale is not None:
+            try:
+                format_prior_scale_variant(prior_scale)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--prior-scale") from exc
         if resolve_mode not in {"latest", "strict"}:
             raise typer.BadParameter("resolve mode must be 'latest' or 'strict'")
         if alignment_mode not in ALIGNMENT_MODES:
@@ -251,6 +272,7 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             embedding_variants=list(embedding_variant) or None,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=list(model) or None,
+            prior_scale=prior_scale,
             excluded_categories=list(exclude_category) or None,
             include_all_category=include_all_category,
             output_path=output_path,
@@ -501,22 +523,12 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
     @evaluation_app.command("word-based-topic-word-table")
     def word_based_topic_word_table(
         profile_json: Path = typer.Option(...),
-        topic_words_json: Optional[Path] = typer.Option(None),
+        topic_words_json: Path = typer.Option(...),
         iteration: Optional[int] = typer.Option(None),
         labels: Optional[list[str]] = typer.Option(None),
         max_topics_per_group: Optional[int] = typer.Option(None),
         topic_source: str = typer.Option("labels"),
         words_per_topic: int = typer.Option(10),
-        language: Optional[str] = typer.Option(None),
-        data_column: str = typer.Option("data"),
-        target_column: str = typer.Option("target_str"),
-        label_schema: str = typer.Option("identity"),
-        delimiter: str = typer.Option(" / "),
-        min_token_len: int = typer.Option(2),
-        ja_replace_num: bool = typer.Option(False),
-        ja_dicdir: Optional[str] = typer.Option(None),
-        ja_require_unidic: bool = typer.Option(False),
-        representative_words_method: str = typer.Option("weighted_tf"),
         include_score: bool = typer.Option(False),
         layout: str = typer.Option("horizontal"),
         table_width_scale: float = typer.Option(0.95),
@@ -534,16 +546,6 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             max_topics_per_group=max_topics_per_group,
             topic_source=topic_source,
             words_per_topic=words_per_topic,
-            language=language,
-            data_column=data_column,
-            target_column=target_column,
-            label_schema=label_schema,
-            delimiter=delimiter,
-            min_token_len=min_token_len,
-            ja_replace_num=ja_replace_num,
-            ja_dicdir=ja_dicdir,
-            ja_require_unidic=ja_require_unidic,
-            representative_words_method=representative_words_method,
             include_score=include_score,
             layout=layout,
             table_width_scale=table_width_scale,
@@ -557,10 +559,12 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
     @evaluation_app.command(
         "word-based-metrics",
         help=(
-            "Write topic-word metrics under "
-            "results/topic_analysis/coherence/archive/<date>/<dataset>/<data_run>/<category>/<display_key>/exec_<timestamp>/ "
-            "and update results/topic_analysis/coherence/latest/.../CURRENT.json "
-            "by default."
+            "Write topic-word metrics. With the default --out-root "
+            "(results/topic_analysis/coherence) results use the legacy "
+            "archive/<date>/exec_*/ layout with latest/CURRENT.json; with a "
+            "custom --out-root they are written under "
+            "<out_root>/<dataset>/<data_run>/<category>/<condition_id>/ "
+            "and <out_root>/condition_index.json is updated."
         ),
     )
     def word_based_metrics(
@@ -579,17 +583,30 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         coherence_window_size: Optional[int] = typer.Option(None),
         coherence_min_window_count: Optional[int] = typer.Option(None),
         diversity_topn: int = typer.Option(25),
-        gaussian_word2vec: str = typer.Option("glove-wiki-gigaword-100"),
+        topic_word_score_mode: str = typer.Option(
+            "word_topic_npmi", "--topic-word-score-mode"
+        ),
+        gaussian_word2vec: str = typer.Option("word2vec-google-news-300"),
         coherence_split: str = typer.Option("train"),
         coherence_min_token_len: int = typer.Option(2),
         dict_no_below: int = typer.Option(3),
         dict_no_above: float = typer.Option(0.7),
+        dict_exclude_tokens: str = typer.Option(
+            "", "--dict-exclude-tokens", "--dict_exclude_tokens"
+        ),
         dict_exclude_single_alpha: bool = typer.Option(False),
         dict_exclude_with_digit: bool = typer.Option(False),
         dict_exclude_hiragana_only: bool = typer.Option(False),
-        proxy_npmi_mode: str = typer.Option("sentence"),
-        proxy_word_score_mode: str = typer.Option("word_npmi"),
-        coherence_reference: str = typer.Option("dataset"),
+        posterior_num_chains: int = typer.Option(1),
+        posterior_burn_in_sweeps: int = typer.Option(20),
+        posterior_retained_samples: int = typer.Option(20),
+        posterior_thinning: int = typer.Option(1),
+        posterior_seed: int = typer.Option(0),
+        posterior_backend: str = typer.Option("numba"),
+        etm_theta_samples: int = typer.Option(100),
+        etm_posterior_seed: int = typer.Option(0),
+        npmi_min_expected_count: Optional[float] = typer.Option(None),
+        coherence_reference: str = typer.Option("wikipedia"),
         coherence_reference_path: Optional[Path] = typer.Option(None),
         coherence_reference_format: str = typer.Option("tokenized_jsonl"),
         coherence_reference_max_docs: Optional[int] = typer.Option(None),
@@ -602,11 +619,26 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
         coherence_count_chunk_size: int = typer.Option(
             25000, "--coherence-count-chunk-size"
         ),
+        reference_index_mode: str = typer.Option("off", "--reference-index-mode"),
+        reference_index_root: Optional[Path] = typer.Option(
+            None, "--reference-index-root"
+        ),
+        reference_count_max_pending: Optional[int] = typer.Option(
+            None, "--reference-count-max-pending"
+        ),
+        checkpoint_mode: str = typer.Option("auto", "--checkpoint-mode"),
+        checkpoint_root: Optional[Path] = typer.Option(None, "--checkpoint-root"),
+        reference_count_cache_mode: str = typer.Option(
+            "auto", "--reference-count-cache-mode"
+        ),
         coherence_topic_word_workers: int = typer.Option(
             1, "--coherence-topic-word-workers"
         ),
         coherence_score_workers: int = typer.Option(1, "--coherence-score-workers"),
         skip_existing: bool = typer.Option(False),
+        condition_failure_policy: str = typer.Option(
+            "exclude-condition", "--condition-failure-policy"
+        ),
         language: str = typer.Option("english"),
         delimiter: str = typer.Option(" / "),
         ja_replace_num: bool = typer.Option(True),
@@ -631,16 +663,29 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             coherence_window_size=coherence_window_size,
             coherence_min_window_count=coherence_min_window_count,
             diversity_topn=diversity_topn,
+            topic_word_score_mode=topic_word_score_mode,
             gaussian_word2vec=gaussian_word2vec,
             coherence_split=coherence_split,
             coherence_min_token_len=coherence_min_token_len,
             dict_no_below=dict_no_below,
             dict_no_above=dict_no_above,
+            dict_exclude_tokens=frozenset(
+                token.strip()
+                for token in dict_exclude_tokens.split(",")
+                if token.strip()
+            ),
             dict_exclude_single_alpha=dict_exclude_single_alpha,
             dict_exclude_with_digit=dict_exclude_with_digit,
             dict_exclude_hiragana_only=dict_exclude_hiragana_only,
-            proxy_npmi_mode=proxy_npmi_mode,
-            proxy_word_score_mode=proxy_word_score_mode,
+            posterior_num_chains=posterior_num_chains,
+            posterior_burn_in_sweeps=posterior_burn_in_sweeps,
+            posterior_retained_samples=posterior_retained_samples,
+            posterior_thinning=posterior_thinning,
+            posterior_seed=posterior_seed,
+            posterior_backend=posterior_backend,
+            etm_theta_samples=etm_theta_samples,
+            etm_posterior_seed=etm_posterior_seed,
+            npmi_min_expected_count=npmi_min_expected_count,
             coherence_reference=coherence_reference,
             coherence_reference_path=coherence_reference_path,
             coherence_reference_format=coherence_reference_format,
@@ -650,9 +695,16 @@ def register_evaluation_commands(evaluation_app: typer.Typer) -> None:
             coherence_count_backend=coherence_count_backend,
             coherence_count_workers=coherence_count_workers,
             coherence_count_chunk_size=coherence_count_chunk_size,
+            reference_index_mode=reference_index_mode,
+            reference_index_root=reference_index_root,
+            reference_count_max_pending=reference_count_max_pending,
+            checkpoint_mode=checkpoint_mode,
+            checkpoint_root=checkpoint_root,
+            reference_count_cache_mode=reference_count_cache_mode,
             coherence_topic_word_workers=coherence_topic_word_workers,
             coherence_score_workers=coherence_score_workers,
             skip_existing=skip_existing,
+            condition_failure_policy=condition_failure_policy,
             language=language,
             delimiter=delimiter,
             ja_replace_num=ja_replace_num,

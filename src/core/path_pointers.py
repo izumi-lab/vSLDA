@@ -35,6 +35,7 @@ def write_pointer_at(
     condition_fingerprint: str | None,
     artifacts: Mapping[str, str],
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     encoder_config: Mapping[str, Any] | None = None,
 ) -> Path:
     payload = build_latest_result_pointer(
@@ -49,6 +50,7 @@ def write_pointer_at(
         condition_fingerprint=condition_fingerprint,
         artifacts=artifacts,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         encoder_config=encoder_config,
     )
     save_latest_result_pointer(payload, pointer_path)
@@ -118,6 +120,7 @@ def write_baseline_latest_pointer(
     artifacts: Mapping[str, str],
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     encoder_config: Mapping[str, Any] | None = None,
     baseline_root: Path | None = None,
 ) -> Path:
@@ -130,6 +133,7 @@ def write_baseline_latest_pointer(
         num_topics=num_topics,
         num_components=num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         baseline_root=baseline_root,
     )
     return write_pointer_at(
@@ -140,6 +144,7 @@ def write_baseline_latest_pointer(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         ),
         dataset=dataset,
         data_run=data_run,
@@ -150,6 +155,7 @@ def write_baseline_latest_pointer(
         condition_fingerprint=condition_fingerprint,
         artifacts=artifacts,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         encoder_config=encoder_config,
     )
 

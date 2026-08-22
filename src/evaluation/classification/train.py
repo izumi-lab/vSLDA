@@ -37,6 +37,7 @@ def train(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> (
     tuple[
         dict[str, float],
@@ -72,6 +73,7 @@ def train(
         embedding_variants=embedding_variants,
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
+        prior_scale=prior_scale,
     )
 
 
@@ -92,6 +94,7 @@ def run_classification_evaluation(
     embedding_variants: Sequence[str] | None = None,
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
+    prior_scale: float | None = None,
 ) -> None:
     if seed is not None:
         set_global_seed(seed)
@@ -123,6 +126,7 @@ def run_classification_evaluation(
                     embedding_variants=embedding_variants,
                     feature_resolve_mode=feature_resolve_mode,
                     selected_models=selected_models,
+                    prior_scale=prior_scale,
                 ),
                 acc_filename=f"acc_{dataset}_{num_topics}topic.json",
                 f1_filename=f"f1_{dataset}_{num_topics}topic.json",
@@ -133,6 +137,7 @@ def run_classification_evaluation(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
+            prior_scale=prior_scale,
         )
 
 

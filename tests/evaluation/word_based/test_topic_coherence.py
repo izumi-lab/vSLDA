@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from gensim.corpora import Dictionary
 
@@ -12,7 +13,42 @@ from src.core.artifacts import load_json, save_pickle
 from src.data.preprocessing import PreprocessedDocument
 from src.evaluation.reporting import read_evaluation_json
 from src.evaluation.word_based.metrics import run_topic_coherence_analysis
+from src.evaluation.word_based.reporting import build_output_condition_id
+from src.evaluation.word_based.topic_word_runtime import RuntimeTopicWords
 from src.evaluation.word_based.topic_words import TopicWordsResult
+
+
+def test_word_based_output_identity_includes_prior_scale() -> None:
+    common = dict(
+        model="gaussianlda",
+        dataset="dummy",
+        data_run="default",
+        category="all",
+        iterations=[0],
+        num_topics=10,
+        coherence="c_npmi",
+        coherence_topn=10,
+        coherence_window_size=10,
+        coherence_implementation="project_epsilon_smoothed",
+        coherence_min_window_count=None,
+        coherence_reference="dataset",
+        coherence_reference_path=None,
+        coherence_reference_format=None,
+        coherence_reference_max_docs=None,
+        coherence_reference_min_doc_tokens=1,
+        coherence_reference_streaming=False,
+        diversity_topn=25,
+        coherence_split="train",
+        topic_word_source="test",
+        embedding_variant="googlenews300",
+        metric_names=["coherence_c_npmi", "topic_diversity"],
+    )
+    point_one = build_output_condition_id(**common, prior_scale=0.1)
+    three = build_output_condition_id(**common, prior_scale=3.0)
+
+    assert "__psi0-0p1__" in point_one[0]
+    assert "__psi0-3__" in three[0]
+    assert point_one[1] != three[1]
 
 
 def _set_fixed_now(
@@ -34,26 +70,41 @@ def _set_fixed_now(
     )
 
 
+def _runtime_topic_words(
+    topic_words=None,
+    *,
+    model: str = "vmf",
+) -> RuntimeTopicWords:
+    words = topic_words or [[("alpha", 1.0)], [("beta", 0.5)]]
+    display_source = (
+        "ctm_variational_word_topic_npmi"
+        if model == "ctm"
+        else "posthoc_word_topic_npmi"
+    )
+    return RuntimeTopicWords(
+        evaluation=TopicWordsResult(
+            topic_words=words,
+            topic_word_source="posthoc_expected_p_w_given_topic",
+            score_mode="topic_word_probability",
+            score_definition="test expected counts",
+        ),
+        display_topic_words=words,
+        display_source=display_source,
+        display_score_mode="word_topic_npmi",
+        protocol="test_runtime",
+        condition_dir=Path("/tmp/test-condition"),
+        source_condition_fingerprint="source-fingerprint",
+        vocabulary_fingerprint="vocabulary-fingerprint",
+        corpus_fingerprint="corpus-fingerprint",
+        coverage={"token_coverage": 1.0},
+        expected_counts=np.ones((len(words), 2)),
+    )
+
+
 def _patch_vmf_proxy_topic_words(monkeypatch) -> None:
     monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_learned_model",
-        lambda **_kwargs: pytest.fail("vmf should use proxy topic words"),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        lambda **_kwargs: TopicWordsResult(
-            topic_words=[[("alpha", 1.0)], [("beta", 0.5)]],
-            topic_word_source="sentence_topic_proxy_npmi",
-            score_mode="word_npmi",
-            score_definition="PMI normalized by -log p(w)",
-        ),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **kwargs: _runtime_topic_words(model=kwargs["model"]),
     )
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.load_documents",
@@ -62,6 +113,14 @@ def _patch_vmf_proxy_topic_words(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.tokenize_sentence_documents",
         lambda **_kwargs: [[["alpha"]], [["beta"]]],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_runtime_topic_words(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **kwargs: _runtime_topic_words(model=kwargs["model"]),
     )
 
 
@@ -115,7 +174,12 @@ def test_run_topic_coherence_analysis_persists_model_provenance(
     metrics_path = next(archive_root.glob("it0__k2__vmf__*/exec_*/metrics_agg.json"))
     metrics_meta, metrics_results = read_evaluation_json(metrics_path)
     assert metrics_meta["data_run"] == "default"
-    assert metrics_meta["condition_id"] == "it0__k2__vmf__palmetto-cv__mpnet"
+    condition_id = str(metrics_meta["condition_id"])
+    prefix, _, fingerprint_suffix = condition_id.rpartition("__")
+    assert prefix == "it0__k2__vmf__palmetto-cv__mpnet"
+    assert len(fingerprint_suffix) == 8 and all(
+        char in "0123456789abcdef" for char in fingerprint_suffix
+    )
     assert "__palmetto-cv__" in metrics_meta["condition_id"]
     assert metrics_meta["display_key"] == metrics_meta["condition_id"]
     assert metrics_meta["execution_id"] == "exec_20260413T000000Z"
@@ -163,13 +227,11 @@ def test_run_topic_coherence_analysis_persists_model_provenance(
     metadata_path = metrics_path.parent / "metadata.json"
     assert metadata_path.exists()
 
-    topic_words_path = metrics_path.parent / "topic_words_topk.json"
+    topic_words_path = metrics_path.parent / "topic_words_evaluation_topk.json"
     topic_words_meta, _topic_words_results = read_evaluation_json(topic_words_path)
     assert topic_words_meta["data_run"] == "default"
     assert topic_words_meta["model_provenance"]["parameter_variant"] == "passes=40"
-    assert topic_words_meta["topn"] == 25
-    assert topic_words_meta["coherence_topn"] == 10
-    assert topic_words_meta["diversity_topn"] == 25
+    assert topic_words_meta["topic_word_role"] == "evaluation"
 
     latest_pointer = load_json(
         tmp_path
@@ -182,15 +244,22 @@ def test_run_topic_coherence_analysis_persists_model_provenance(
     )
     assert latest_pointer["display_key"] == metrics_meta["display_key"]
     assert latest_pointer["execution_id"] == "exec_20260413T000000Z"
-    assert latest_pointer["artifacts"]["metrics"] == "metrics_agg.json"
-    assert latest_pointer["artifacts"]["topic_words"] == "topic_words_topk.json"
+    assert latest_pointer["artifacts"]["metrics_agg"] == "metrics_agg.json"
+    assert (
+        latest_pointer["artifacts"]["topic_words_evaluation_topk"]
+        == "topic_words_evaluation_topk.json"
+    )
+    assert (
+        latest_pointer["artifacts"]["topic_words_display_topk"]
+        == "topic_words_display_topk.json"
+    )
     assert latest_pointer["artifacts"]["metadata"] == "metadata.json"
 
     assert not (tmp_path / "summary_metrics.csv").exists()
     assert not (tmp_path / "summary_metrics.json").exists()
 
 
-def test_run_topic_coherence_analysis_skip_existing_ignores_fingerprint(
+def test_run_topic_coherence_analysis_skip_existing_respects_settings(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -246,11 +315,46 @@ def test_run_topic_coherence_analysis_skip_existing_ignores_fingerprint(
         num_topics=2,
         categories=["all"],
         out_root=tmp_path,
-        coherence_topn=11,
+        coherence_topn=10,
         skip_existing=True,
     )
 
+    # Identical settings reuse the existing output.
     assert calls["evaluate"] == 1
+
+    _set_fixed_now(monkeypatch, "2026-04-13T02:00:00+00:00")
+    run_topic_coherence_analysis(
+        models=["vmf"],
+        dataset="dummy",
+        data_runs=["default"],
+        iterations=[0],
+        num_topics=2,
+        categories=["all"],
+        out_root=tmp_path,
+        coherence_topn=10,
+        posterior_seed=7,
+        skip_existing=True,
+    )
+
+    # A different posterior configuration must not be reused.
+    assert calls["evaluate"] == 2
+
+    _set_fixed_now(monkeypatch, "2026-04-13T03:00:00+00:00")
+    run_topic_coherence_analysis(
+        models=["vmf"],
+        dataset="dummy",
+        data_runs=["default"],
+        iterations=[0],
+        num_topics=2,
+        categories=["all"],
+        out_root=tmp_path,
+        coherence_topn=10,
+        topic_word_score_mode="topic_word_probability",
+        skip_existing=True,
+    )
+
+    # The representative-word ranking is part of the output identity.
+    assert calls["evaluate"] == 3
 
 
 def test_run_topic_coherence_analysis_writes_multiple_coherence_metrics(
@@ -359,31 +463,6 @@ def test_run_topic_coherence_analysis_supports_sentlda_proxy_mode(
         ),
     )
     monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        lambda **_kwargs: TopicWordsResult(
-            topic_words=[[("alpha", 1.0)], [("beta", 0.5)]],
-            topic_word_source="sentence_topic_proxy_npmi",
-            score_mode="word_npmi",
-            score_definition="PMI normalized by -log p(w)",
-        ),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics._load_sentlda_effective_corpus_bundle",
-        lambda **_kwargs: (
-            [["alpha"], ["beta"]],
-            dictionary,
-            [[(0, 1)], [(1, 1)]],
-            [[["alpha"]], [["beta"]]],
-        ),
-    )
-    monkeypatch.setattr(
         "src.evaluation.word_based.metrics.evaluate_topic_words",
         lambda **_kwargs: {"coherence": 0.31, "diversity": 0.9},
     )
@@ -405,7 +484,6 @@ def test_run_topic_coherence_analysis_supports_sentlda_proxy_mode(
         num_topics=2,
         categories=["all"],
         out_root=tmp_path,
-        proxy_word_score_mode="word_npmi",
     )
 
     assert output_root == tmp_path
@@ -417,18 +495,13 @@ def test_run_topic_coherence_analysis_supports_sentlda_proxy_mode(
     )
     metrics_meta, metrics_results = read_evaluation_json(metrics_path)
     assert metrics_meta["model_provenance"]["model_key"] == "sentlda"
-    assert metrics_meta["topic_words"]["score_mode"] == "word_npmi"
-    assert (
-        metrics_meta["topic_words"]["score_definition"] == "PMI normalized by -log p(w)"
-    )
-    assert metrics_meta["coherence"]["proxy_word_score_mode"] == "word_npmi"
+    assert metrics_meta["topic_words"]["score_mode"] == "word_topic_npmi"
     assert metrics_results["aggregate"]["coherence"]["mean"] == 0.31
 
-    topic_words_path = metrics_path.parent / "topic_words_topk.json"
+    topic_words_path = metrics_path.parent / "topic_words_evaluation_topk.json"
     topic_words_meta, _topic_words_results = read_evaluation_json(topic_words_path)
     assert topic_words_meta["model_provenance"]["runner_family"] == "sentlda"
-    assert topic_words_meta["score_mode"] == "word_npmi"
-    assert topic_words_meta["score_definition"] == "PMI normalized by -log p(w)"
+    assert topic_words_meta["score_mode"] == "word_topic_npmi"
 
     assert not (tmp_path / "summary_metrics.csv").exists()
     assert not (tmp_path / "summary_metrics.json").exists()
@@ -452,26 +525,6 @@ def test_run_topic_coherence_analysis_uses_proxy_for_vmf(
             dictionary,
             [[(0, 1)], [(1, 1)]],
         ),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_learned_model",
-        lambda **_kwargs: pytest.fail("vmf should use proxy topic words"),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        lambda **_kwargs: TopicWordsResult(
-            topic_words=[[("alpha", 1.0)], [("beta", 0.5)]],
-            topic_word_source="sentence_topic_proxy_npmi",
-            score_mode="word_npmi",
-            score_definition="PMI normalized by -log p(w)",
-        ),
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
     )
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.load_documents",
@@ -501,7 +554,6 @@ def test_run_topic_coherence_analysis_uses_proxy_for_vmf(
         num_topics=2,
         categories=["all"],
         out_root=tmp_path,
-        proxy_word_score_mode="word_npmi",
     )
 
     metrics_path = next(
@@ -510,10 +562,8 @@ def test_run_topic_coherence_analysis_uses_proxy_for_vmf(
         )
     )
     metrics_meta, metrics_results = read_evaluation_json(metrics_path)
-    assert metrics_meta["topic_words"]["source"] == "sentence_topic_proxy_npmi"
-    assert metrics_meta["topic_words"]["score_mode"] == "word_npmi"
-    assert metrics_meta["coherence"]["proxy_npmi_mode"] == "sentence"
-    assert metrics_meta["coherence"]["proxy_word_score_mode"] == "word_npmi"
+    assert metrics_meta["topic_words"]["source"] == "posthoc_word_topic_npmi"
+    assert metrics_meta["topic_words"]["score_mode"] == "word_topic_npmi"
     assert metrics_results["aggregate"]["coherence"]["mean"] == 0.29
 
 
@@ -559,15 +609,14 @@ def test_run_topic_coherence_analysis_uses_wikipedia_reference_for_coherence(
         )
 
     monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        _extract_topic_words,
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **kwargs: (
+            captured.__setitem__("proxy_dictionary", kwargs["dictionary"])
+            or _runtime_topic_words(
+                [[("wiki_alpha", 1.0)], [("wiki_beta", 0.5)]],
+                model=kwargs["model"],
+            )
+        ),
     )
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.load_documents",
@@ -652,9 +701,9 @@ def test_run_topic_coherence_analysis_uses_wikipedia_reference_for_coherence(
     assert metrics_meta["coherence"]["coherence_min_window_count"] == 7
 
     topic_words_meta, _ = read_evaluation_json(
-        metrics_path.parent / "topic_words_topk.json"
+        metrics_path.parent / "topic_words_evaluation_topk.json"
     )
-    assert topic_words_meta["coherence_reference"]["coherence_reference"] == "wikipedia"
+    assert topic_words_meta["topic_word_role"] == "evaluation"
 
     assert not (tmp_path / "summary_metrics.csv").exists()
     assert not (tmp_path / "summary_metrics.json").exists()
@@ -696,15 +745,11 @@ def test_run_topic_coherence_analysis_streams_uncapped_wikipedia_reference(
         )
 
     monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        _extract_topic_words,
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **kwargs: _runtime_topic_words(
+            [[("wiki_alpha", 1.0)], [("wiki_beta", 0.5)]],
+            model=kwargs["model"],
+        ),
     )
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.load_documents",
@@ -812,15 +857,14 @@ def test_run_topic_coherence_analysis_scans_wikipedia_reference_once_for_categor
         )
 
     monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        _extract_topic_words,
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **kwargs: _runtime_topic_words(
+            [
+                [(f"wiki_{next(extracted_categories)}", 1.0)],
+                [("wiki_shared", 0.5)],
+            ],
+            model=kwargs["model"],
+        ),
     )
     monkeypatch.setattr(
         "src.evaluation.word_based.metrics.load_documents",
@@ -909,11 +953,17 @@ def test_run_topic_coherence_analysis_parallelizes_topic_words_and_scoring(
                         [(f"wiki_{task.category}", 1.0)],
                         [("wiki_shared", 0.5)],
                     ],
+                    runtime_payload=_runtime_topic_words(
+                        [
+                            [(f"wiki_{task.category}", 1.0)],
+                            [("wiki_shared", 0.5)],
+                        ]
+                    ),
                 )
             ],
             topic_word_source="sentence_topic_proxy_npmi",
-            proxy_word_score_mode="word_npmi",
-            proxy_word_score_definition="PMI normalized by -log p(w)",
+            topic_word_score_mode="topic_word_probability",
+            topic_word_score_definition="test expected counts",
         )
 
     def _score_pending_word_based_group(**kwargs):
@@ -967,6 +1017,7 @@ def test_run_topic_coherence_analysis_parallelizes_topic_words_and_scoring(
         coherence_reference="wikipedia",
         coherence_reference_path=reference_path,
         coherence_topic_word_workers=2,
+        topic_word_encoder_device="cpu",
         coherence_score_workers=2,
     )
 
@@ -978,6 +1029,42 @@ def test_run_topic_coherence_analysis_parallelizes_topic_words_and_scoring(
         "wiki_sports",
         "wiki_shared",
     }
+
+
+def test_run_topic_coherence_analysis_rejects_invalid_encoder_batch_size(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="topic_word_encode_batch_size must be > 0"):
+        run_topic_coherence_analysis(
+            models=["vmf"],
+            dataset="dummy",
+            iterations=[0],
+            num_topics=2,
+            categories=["all"],
+            out_root=tmp_path,
+            topic_word_encode_batch_size=0,
+        )
+
+
+def test_run_topic_coherence_analysis_rejects_parallel_cuda_encoders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.resolve_topic_word_encoder_device",
+        lambda _requested: "cuda",
+    )
+
+    with pytest.raises(ValueError, match="coherence_topic_word_workers must be 1"):
+        run_topic_coherence_analysis(
+            models=["vmf"],
+            dataset="dummy",
+            iterations=[0],
+            num_topics=2,
+            categories=["all"],
+            out_root=tmp_path,
+            coherence_topic_word_workers=2,
+        )
 
 
 def test_run_topic_coherence_analysis_requires_wikipedia_reference_path(
@@ -1103,18 +1190,6 @@ def test_run_topic_coherence_analysis_aligns_sentlda_to_preprocessed_docs(
             score_definition="PMI normalized by -log p(w)",
         )
 
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.extract_topic_words_from_sentence_topic_npmi",
-        _extract_topic_words,
-    )
-    monkeypatch.setattr(
-        "src.evaluation.word_based.metrics.load_sentence_topics",
-        lambda **_kwargs: [
-            [[1.0, 0.0]],
-            [[0.0, 1.0]],
-        ],
-    )
-
     def _evaluate_topic_words(**kwargs):
         captured["coherence_docs"] = len(kwargs["texts"])
         return {"coherence": 0.31, "diversity": 0.9}
@@ -1140,10 +1215,9 @@ def test_run_topic_coherence_analysis_aligns_sentlda_to_preprocessed_docs(
         num_topics=2,
         categories=["all"],
         out_root=tmp_path,
-        proxy_word_score_mode="word_npmi",
     )
 
-    assert captured == {"sentence_docs": 2, "coherence_docs": 2}
+    assert captured == {"coherence_docs": 3}
 
 
 def test_run_topic_coherence_analysis_does_not_update_latest_pointer_on_failure(
@@ -1261,7 +1335,8 @@ def test_run_topic_coherence_analysis_custom_out_root_keeps_direct_layout(
         )
     )
     assert metrics_path.exists()
-    assert (metrics_path.parent / "topic_words_topk.json").exists()
+    assert (metrics_path.parent / "topic_words_evaluation_topk.json").exists()
+    assert (metrics_path.parent / "topic_words_display_topk.json").exists()
     assert (metrics_path.parent / "metadata.json").exists()
     assert not (tmp_path / "archive").exists()
     assert not (tmp_path / "latest").exists()

@@ -5,6 +5,7 @@ from typing import Optional
 
 import typer
 
+from src.baselines.params import format_prior_scale_variant
 from src.cli.options import empty_to_none
 from src.cli.workflows import DEFAULT_ALL_EXPERIMENT_CONFIGS
 
@@ -33,12 +34,33 @@ def register_experiment_commands(experiments_app: typer.Typer) -> None:
             "--strip-terminal-normalize/--keep-terminal-normalize",
             help="Override encoder.strip_terminal_normalize.",
         ),
+        prior_scale: Optional[float] = typer.Option(
+            None,
+            "--prior-scale",
+            min=0.0,
+            help="Override Psi_0 = prior_scale * I for GaussianLDA-family baselines.",
+        ),
+        word2vec: Optional[str] = typer.Option(
+            None,
+            "--word2vec",
+            help=(
+                "Override the pretrained word vectors for GaussianLDA / ETM / MvTM "
+                "(e.g. word2vec-google-news-300). The result-path suffix follows the "
+                "name, so glove-wiki-gigaword-100 writes _glove100 and "
+                "word2vec-google-news-300 writes _googlenews300."
+            ),
+        ),
         category: list[str] = typer.Option([], "--category"),
         topic: list[int] = typer.Option([], "--topic"),
         iteration: list[int] = typer.Option([], "--iteration"),
     ) -> None:
         from src.cli.workflows import run_experiments_workflow
 
+        if prior_scale is not None:
+            try:
+                format_prior_scale_variant(prior_scale)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--prior-scale") from exc
         run_experiments_workflow(
             config=config,
             models=models,
@@ -51,6 +73,8 @@ def register_experiment_commands(experiments_app: typer.Typer) -> None:
             iterations=empty_to_none(iteration),
             encoder_model=encoder_model,
             strip_terminal_normalize=strip_terminal_normalize,
+            prior_scale=prior_scale,
+            word2vec=word2vec,
         )
 
     @experiments_app.command(

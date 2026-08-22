@@ -410,6 +410,8 @@ def test_vmf_sample_records_empty_topic_repair_diagnostics() -> None:
     assert diagnostic.alpha_min >= 1e-3
     assert diagnostic.alpha_floor_count >= 0
     assert isinstance(diagnostic.empty_topics, list)
+    assert diagnostic.stored_kappa_max <= trainer.max_kappa
+    assert diagnostic.num_kappa_clipped == len(diagnostic.clipped_topic_ids)
     assert trainer.assert_valid_state().is_valid is True
 
 
@@ -706,6 +708,7 @@ def test_vmf_artifact_payload_saves_params_and_arrays(tmp_path: Path) -> None:
         alpha=np.array([0.5, 0.5], dtype=np.float64),
         num_topics=2,
         kappa_default=10.0,
+        max_kappa=10_000.0,
         num_components=1,
         pre_normalize_transform="mean_center",
         whitening_eps=1e-5,
@@ -724,6 +727,7 @@ def test_vmf_artifact_payload_saves_params_and_arrays(tmp_path: Path) -> None:
 
     assert saved["params"] == tmp_path / "params.json"
     assert load_json(saved["params"])["pre_normalize_transform"] == "mean_center"
+    assert load_json(saved["params"])["max_kappa"] == 10_000.0
     assert (
         load_json(saved["params"])["embedding_cache"]["strategy"]
         == "preencoded_training_corpus"
