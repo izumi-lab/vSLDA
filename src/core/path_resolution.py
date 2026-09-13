@@ -9,6 +9,7 @@ from src.core.artifacts import (
     load_artifact_json,
 )
 from src.core.errors import MissingArtifactError
+from src.core.vmf_assignment import VMF_ASSIGNMENTS, vmf_doc_topic_filename
 
 from .path_builders import (
     build_baseline_dir,
@@ -22,6 +23,7 @@ from .path_builders import (
     legacy_vmf_experiment_dir,
 )
 from .paths_roots import RESULTS_ROOT, VISUALIZATION_RESULTS_ROOT, resolve_project_path
+from .vmf_variant import is_vmf_parameter_variant, vmf_variant_matches
 
 
 def _current_experiment_results_root() -> Path:
@@ -54,9 +56,26 @@ def _embedding_latest_dirs(
     dirs.extend(
         path
         for path in sorted(parent.iterdir())
-        if path.is_dir() and path.name.startswith(prefix)
+        if path.is_dir()
+        and path.name.startswith(prefix)
+        and not _is_vmf_variant_sibling(path.name, prefix)
     )
     return dirs
+
+
+def _is_vmf_variant_sibling(name: str, prefix: str) -> bool:
+    """Whether a sibling differs from the requested key only by a vMF hyperparameter label.
+
+    Those runs (``<key>_kappa0-100`` and the like) belong to the sensitivity sweep and are
+    selected explicitly through ``parameter_variant``; they never stand in for the default run.
+    """
+    rest = name[len(prefix) :]
+    if is_vmf_parameter_variant(rest):
+        return True
+    # An embedding suffix followed by a hyperparameter label (``<key>_minilm_zeta-40``)
+    # when no embedding variant was requested.
+    head, _, tail = rest.partition("_")
+    return bool(head) and is_vmf_parameter_variant(tail)
 
 
 def _archive_from_latest_pointers(
@@ -210,11 +229,12 @@ def build_vmf_doc_topic_path(
     condition_payload: Mapping[str, Any] | None = None,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     dataset_root: Path | None = None,
 ) -> Path:
     if split not in {"train", "test"}:
         raise ValueError(f"Unsupported split: {split}")
-    if assignment not in {"hard", "soft"}:
+    if assignment not in VMF_ASSIGNMENTS:
         raise ValueError(f"Unsupported assignment: {assignment}")
 
     if condition_id is None:
@@ -227,6 +247,7 @@ def build_vmf_doc_topic_path(
                 run_name=run_name,
                 num_components=num_components,
                 embedding_variant=embedding_variant,
+                parameter_variant=parameter_variant,
                 dataset_root=dataset_root,
             )
         except MissingArtifactError as exc:
@@ -263,14 +284,63 @@ def build_vmf_doc_topic_path(
                     condition_id=condition_id,
                     num_components=num_components,
                     embedding_variant=embedding_variant,
+                    parameter_variant=parameter_variant,
                     dataset_root=dataset_root,
                 )
             except MissingArtifactError as exc:
                 if _is_ambiguous_artifact_error(exc):
                     raise
                 pass
-    suffix = "_soft" if assignment == "soft" else ""
-    return result_dir / f"doc_topic_{split}{suffix}.pkl"
+    return result_dir / vmf_doc_topic_filename(split, assignment)
+
+
+def _resolve_baseline_condition_root(
+    *,
+    model: str,
+    dataset: str,
+    iteration: int,
+    num_topics: int,
+    category: str,
+    data_run: str,
+    condition_id: str | None,
+    condition_payload: Mapping[str, Any] | None,
+    num_components: int | None,
+    embedding_variant: str | None,
+    parameter_variant: str | None,
+    baseline_root: Path | None,
+) -> Path:
+    """The run directory (parent of ``params/`` and ``infer/``) of a baseline condition:
+    the latest pointer when it resolves, otherwise the archive path the axes name."""
+
+    try:
+        return resolve_baseline_condition_dir(
+            model=model,
+            dataset=dataset,
+            iteration=iteration,
+            num_topics=num_topics,
+            category=category,
+            data_run=data_run,
+            condition_id=condition_id,
+            num_components=num_components,
+            embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
+            baseline_root=baseline_root,
+        )
+    except MissingArtifactError as exc:
+        if _is_ambiguous_artifact_error(exc):
+            raise
+    return build_baseline_dir(
+        model=model,
+        split_root="params",
+        dataset=dataset,
+        iteration=iteration,
+        num_topics=num_topics,
+        category=category,
+        data_run=data_run,
+        condition_id=condition_id,
+        condition_payload=condition_payload,
+        baseline_root=baseline_root,
+    ).parent
 
 
 def build_baseline_doc_topic_path(
@@ -289,9 +359,39 @@ def build_baseline_doc_topic_path(
     embedding_variant: str | None = None,
     parameter_variant: str | None = None,
     baseline_root: Path | None = None,
+    assignment: str | None = None,
 ) -> Path | None:
+    """``assignment`` (vMF-family estimator; MvTM only) selects the fold-in files
+    ``params/<category>_doc_topic_foldin[_counts].pkl`` / ``infer/...``; ``hard``,
+    ``soft`` and ``None`` keep the historical paths (``prefer_soft`` = soft)."""
+
     if split not in {"train", "test"}:
         raise ValueError(f"Unsupported split: {split}")
+    if assignment is not None:
+        from src.core.vmf_assignment import normalize_vmf_assignment
+
+        assignment = normalize_vmf_assignment(assignment)
+        if model == "mvtm" and assignment == "soft":
+            prefer_soft = True
+        if model == "mvtm" and assignment in {"foldin", "foldincounts"}:
+            from src.core.vmf_assignment import mvtm_doc_topic_relpath
+
+            relpath = mvtm_doc_topic_relpath(split, assignment, category=category)
+            condition_dir = _resolve_baseline_condition_root(
+                model=model,
+                dataset=dataset,
+                iteration=iteration,
+                num_topics=num_topics,
+                category=category,
+                data_run=data_run,
+                condition_id=condition_id,
+                condition_payload=condition_payload,
+                num_components=num_components,
+                embedding_variant=embedding_variant,
+                parameter_variant=parameter_variant,
+                baseline_root=baseline_root,
+            )
+            return condition_dir / relpath
 
     resolved_condition_dir: Path | None = None
     if condition_id is None:
@@ -404,6 +504,8 @@ def build_baseline_doc_topic_path(
         "gaussian_kmeans",
         "movmf",
         "gaussian_mixture",
+        "sam",
+        "sam_tf",
     }:
         if split == "train":
             filename = {
@@ -418,6 +520,8 @@ def build_baseline_doc_topic_path(
                 "gaussian_kmeans": f"{category}.pkl",
                 "movmf": f"{category}.pkl",
                 "gaussian_mixture": f"{category}.pkl",
+                "sam": "sam.pkl",
+                "sam_tf": "sam.pkl",
             }[model]
             if resolved_condition_dir is not None:
                 return resolved_condition_dir / "params" / filename
@@ -682,8 +786,15 @@ def resolve_vmf_experiment_dir(
     condition_id: str | None = None,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     dataset_root: Path | None = None,
 ) -> Path:
+    """Locate a trained vMF run.
+
+    ``parameter_variant`` is the hyperparameter label of ``src.core.vmf_variant``; ``None``
+    selects the default run and never a sweep sibling, an explicit label selects exactly
+    that run.
+    """
     dataset_root_candidates = _vmf_dataset_root_candidates(
         dataset=dataset,
         dataset_root=dataset_root,
@@ -691,6 +802,18 @@ def resolve_vmf_experiment_dir(
     fallback_dataset_root = dataset_root_candidates[0]
     missing_errors: list[MissingArtifactError] = []
     metadata_num_components = 1 if num_components is None else int(num_components)
+
+    def _matches_axes(payload: Mapping[str, Any]) -> bool:
+        return (
+            isinstance(payload.get("axes"), dict)
+            and int(payload["axes"].get("iteration", -1)) == int(iteration)
+            and int(payload["axes"].get("num_topics", -1)) == int(num_topics)
+            and str(payload["axes"].get("category")) == str(category)
+            and str(payload["axes"].get("data_run", "default"))
+            == str(run_name or "default")
+            and _vmf_payload_matches_component(payload, metadata_num_components)
+            and vmf_variant_matches(payload.get("parameter_variant"), parameter_variant)
+        )
 
     for resolved_dataset_root in dataset_root_candidates:
         model_root = (
@@ -707,21 +830,26 @@ def resolve_vmf_experiment_dir(
                 num_topics=num_topics,
                 num_components=component_count,
             )
-            latest_pointer_dirs.extend(
-                _embedding_latest_dirs(
-                    exact_dir=build_vmf_latest_dir(
-                        category=category,
-                        iteration=iteration,
-                        num_topics=num_topics,
-                        num_components=component_count,
-                        embedding_variant=embedding_variant,
-                        run_name=run_name,
-                        dataset_root=resolved_dataset_root,
-                    ),
-                    base_display_key=base_display_key,
-                    embedding_variant=embedding_variant,
-                )
+            exact_dir = build_vmf_latest_dir(
+                category=category,
+                iteration=iteration,
+                num_topics=num_topics,
+                num_components=component_count,
+                embedding_variant=embedding_variant,
+                parameter_variant=parameter_variant,
+                run_name=run_name,
+                dataset_root=resolved_dataset_root,
             )
+            if parameter_variant is None:
+                latest_pointer_dirs.extend(
+                    _embedding_latest_dirs(
+                        exact_dir=exact_dir,
+                        base_display_key=base_display_key,
+                        embedding_variant=embedding_variant,
+                    )
+                )
+            else:
+                latest_pointer_dirs.append(exact_dir)
         if condition_id is not None:
             category_first_dir = category_root / condition_id
             if category_first_dir.exists():
@@ -750,20 +878,7 @@ def resolve_vmf_experiment_dir(
                         root=model_root,
                         metadata_path_builder=lambda condition_dir: condition_dir
                         / METADATA_FILENAME,
-                        matches_payload=lambda payload: (
-                            isinstance(payload.get("axes"), dict)
-                            and int(payload["axes"].get("iteration", -1))
-                            == int(iteration)
-                            and int(payload["axes"].get("num_topics", -1))
-                            == int(num_topics)
-                            and str(payload["axes"].get("category")) == str(category)
-                            and str(payload["axes"].get("data_run", "default"))
-                            == str(run_name or "default")
-                            and _vmf_payload_matches_component(
-                                payload,
-                                metadata_num_components,
-                            )
-                        ),
+                        matches_payload=_matches_axes,
                         missing_detail=(
                             "Expected a unique vMF condition directory matching the requested axes."
                         ),
@@ -782,18 +897,7 @@ def resolve_vmf_experiment_dir(
                 root=category_root,
                 metadata_path_builder=lambda condition_dir: condition_dir
                 / METADATA_FILENAME,
-                matches_payload=lambda payload: (
-                    isinstance(payload.get("axes"), dict)
-                    and int(payload["axes"].get("iteration", -1)) == int(iteration)
-                    and int(payload["axes"].get("num_topics", -1)) == int(num_topics)
-                    and str(payload["axes"].get("category")) == str(category)
-                    and str(payload["axes"].get("data_run", "default"))
-                    == str(run_name or "default")
-                    and _vmf_payload_matches_component(
-                        payload,
-                        metadata_num_components,
-                    )
-                ),
+                matches_payload=_matches_axes,
                 missing_detail=(
                     "Expected a unique vMF condition directory matching the requested axes."
                 ),
@@ -808,19 +912,7 @@ def resolve_vmf_experiment_dir(
                     root=model_root,
                     metadata_path_builder=lambda condition_dir: condition_dir
                     / METADATA_FILENAME,
-                    matches_payload=lambda payload: (
-                        isinstance(payload.get("axes"), dict)
-                        and int(payload["axes"].get("iteration", -1)) == int(iteration)
-                        and int(payload["axes"].get("num_topics", -1))
-                        == int(num_topics)
-                        and str(payload["axes"].get("category")) == str(category)
-                        and str(payload["axes"].get("data_run", "default"))
-                        == str(run_name or "default")
-                        and _vmf_payload_matches_component(
-                            payload,
-                            metadata_num_components,
-                        )
-                    ),
+                    matches_payload=_matches_axes,
                     missing_detail=(
                         "Expected a unique vMF condition directory matching the requested axes."
                     ),

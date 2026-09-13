@@ -102,13 +102,13 @@ def run_baselines_for_category(
             **({} if extra_options is None else dict(extra_options)),
             **params,
         }
-        if name in {"bertopic_kmeans", "etm", "sentlda"}:
+        if name in {"bertopic_kmeans", "etm", "sentlda", "sam", "sam_tf"}:
             model_options["effective_random_state"] = resolve_effective_random_state(
                 params=params,
                 iteration=iteration,
                 extra_options=extra_options,
             )
-        if name in {"etm", "sentlda"}:
+        if name in {"etm", "sentlda", "sam", "sam_tf"}:
             model_options["random_state"] = model_options["effective_random_state"]
         if name == "bertopic_kmeans":
             model_options["doc_topic_source"] = "umap_kmeans_centroid_softmax"
@@ -194,6 +194,8 @@ def run_baseline_jobs(
             "execution_id": build_execution_id(prefix="baseline"),
             "seed": job.seed,
             "seed_base": job.seed_base,
+            # vmf.inference.foldin: MvTM writes its fold-in theta like the vMF runs.
+            "vmf_foldin": bool(getattr(job, "vmf_foldin", True)),
         },
         num_topics=job.num_topics,
         iteration=job.iteration,

@@ -143,6 +143,8 @@ def test_run_topic_count_perplexity_analysis_writes_summary_reports(
                 "algorithm_variant": "mixture-2",
                 "encoder_model": "intfloat/e5-base",
                 "embedding_preprocess_variant": "none",
+                "parameter_variant": None,
+                "vmf_hyperparameters": None,
             },
         }
     ]

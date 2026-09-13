@@ -38,6 +38,8 @@ def train(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> (
     tuple[
         dict[str, float],
@@ -74,6 +76,8 @@ def train(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -95,6 +99,8 @@ def run_classification_evaluation(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> None:
     if seed is not None:
         set_global_seed(seed)
@@ -127,6 +133,8 @@ def run_classification_evaluation(
                     feature_resolve_mode=feature_resolve_mode,
                     selected_models=selected_models,
                     prior_scale=prior_scale,
+                    covariance_type=covariance_type,
+                    vmf_variant=vmf_variant,
                 ),
                 acc_filename=f"acc_{dataset}_{num_topics}topic.json",
                 f1_filename=f"f1_{dataset}_{num_topics}topic.json",
@@ -138,6 +146,8 @@ def run_classification_evaluation(
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         )
 
 
@@ -177,7 +187,7 @@ if __name__ == "__main__":
         "--vmf_assignment",
         type=str,
         default="hard",
-        choices=["soft", "hard"],
+        choices=["soft", "hard", "foldin", "foldincounts"],
     )
     parser.add_argument("--result-root", type=Path, default=RESULT_ROOT)
     parser.add_argument("--target-column", type=str, default="target_str")

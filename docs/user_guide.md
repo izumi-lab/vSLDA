@@ -112,7 +112,7 @@ Common experiment options:
 Model kind is tracked explicitly in the runner registry and persisted baseline
 metadata as `method_kind`.
 
-- `method_kind: topic_model`: `vmf_sentence_lda`, `ctm`, `bleilda`,
+- `method_kind: topic_model`: `vmf_sentence_lda`, `ctm`, `bleilda`, `sam`,
   `gaussianlda`, `etm`, `mvtm`, `senclu`, `sentence_gaussianlda`, `sentlda`
 - `method_kind: clustering`: `bertopic_kmeans`, `spherical_kmeans`,
   `gaussian_kmeans`, `movmf`, `gaussian_mixture`
@@ -123,6 +123,15 @@ Notes:
   automatically
 - baseline-specific hyperparameters are configured in `baselines[].params`
   inside the YAML preset
+- `sentence_gaussianlda` accepts `params.covariance_type`: `full` (default; the
+  normal--inverse-Wishart model of the reference implementation), `diag`, or
+  `spherical` (alias `iso`). The reduced types replace the inverse-Wishart on the
+  covariance by a scaled-inverse-chi-squared prior on the variances, keeping the
+  same mean prior and the same empty-topic predictive width, and evaluate every
+  density in O(M). `experiments run --covariance-type` overrides the setting, and
+  a reduced type appends `_cov-diag` / `_cov-iso` to the result-path suffix, so
+  `full` runs keep the paths they have. Evaluation commands select a type with
+  `--covariance-type`; unset means `full`.
 - `summary.json` records execution settings, runtime measurements, and
   comparison metadata
 
@@ -222,6 +231,12 @@ Other evaluation and diagnostic commands include:
 
 - `evaluation list-tasks`
 - `evaluation geometry-based-metrics`
+- `evaluation entropy-based-metrics` / `evaluation entropy-based-summary`
+- `evaluation topic-pair-metrics` / `evaluation topic-pair-summary` (all-topic-pair
+  analysis of `vmf`, `sentlda` and `sentence_gaussianlda` in the shared
+  sentence-embedding space; `tmp_topic_pairs.sh` runs the paper grid and
+  `--paper` writes the `*.scores.json` sidecars the paper repository reads and
+  writes the representative-word sidecars of the reference runs)
 - `evaluation word-based-metrics`
 - `evaluation word-based-label-profile`
 - `evaluation word-based-topic-word-table`
@@ -239,28 +254,10 @@ is one of the built-in variants such as `minilm`, `mpnet`, `bge`, `ruri`, or
 
 ## Output Layout
 
-Main generated roots:
-
-- `results/experiments/`
-- `results/baselines/`
-- `results/classification/`
-
-Conventions:
-
-- experiment and baseline artifacts write full executions to
-  `archive/YYYY-MM-DD/...`
-- the latest successful execution for a short display key is recorded in
-  `latest/.../CURRENT.json`
-- embedding-aware topic model outputs append the short encoder identifier to the
-  display key, for example `k10_it3_c1_mpnet`, `k10_it3_minilm`, or `k10_it3_bge`
-- diagnostic outputs use the same `latest/archive` pattern under their respective
-  roots
-- classification feature readers prefer model `latest/CURRENT.json` pointers,
-  including embedding-aware variants, and still accept older category-first
-  directories when no current pointer matches
-- `evaluation summarize-classification --resolve-mode strict` is available when
-  ambiguous matches should fail instead of auto-selecting the newest result
-
-Experiment and evaluation runs write `CURRENT.json` as part of the normal artifact
-flow. Legacy directories are backward-compatible read targets; normal workflows
-should read through `latest/.../CURRENT.json` when it exists.
+Runs write full executions to `archive/YYYY-MM-DD/...` and record the latest
+successful one per display key in `latest/.../CURRENT.json`; readers resolve through
+that pointer and fall back to legacy category-first directories only when no pointer
+matches (`evaluation summarize-classification --resolve-mode strict` fails instead of
+auto-selecting the newest result). The result roots, display-key suffixes, per-model
+artifact files and the `summaries/` sidecar contract are documented in
+[`artifacts.md`](artifacts.md).

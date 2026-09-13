@@ -115,12 +115,24 @@ def load_gaussian_params(
     means = np.asarray(
         load_artifact_pickle(gaussian_dir / "table_means.pkl"), dtype=float
     )
-    cholesky = np.asarray(
-        load_artifact_pickle(gaussian_dir / "table_cholesky_ltriangular_mat.pkl"),
-        dtype=float,
-    )
     log_determinants = np.asarray(
         load_artifact_pickle(gaussian_dir / "log_determinants.pkl"),
         dtype=float,
     )
+    cholesky_path = gaussian_dir / "table_cholesky_ltriangular_mat.pkl"
+    if cholesky_path.exists():
+        cholesky = np.asarray(load_artifact_pickle(cholesky_path), dtype=float)
+        return means, cholesky, log_determinants
+    # Reduced-covariance (diag / spherical) runs store scaled variances instead of a
+    # Cholesky factor; expand them to the equivalent diagonal factor so the callers'
+    # Gaussian scoring stays unchanged.
+    variances = np.asarray(
+        load_artifact_pickle(gaussian_dir / "table_scaled_variances.pkl"), dtype=float
+    )
+    num_topics, dim = means.shape
+    if variances.ndim == 1:
+        variances = np.repeat(variances[:, np.newaxis], dim, axis=1)
+    cholesky = np.zeros((num_topics, dim, dim), dtype=float)
+    for topic_idx in range(num_topics):
+        cholesky[topic_idx] = np.diag(np.sqrt(variances[topic_idx]))
     return means, cholesky, log_determinants

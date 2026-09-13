@@ -27,6 +27,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_EMBEDDING_VARIANT,
     )
     parser.add_argument("--prior-scale", type=float, default=None)
+    # Hyperparameter-sweep label of the vMF runs to evaluate (src/core/vmf_variant.py);
+    # unset means the default runs.
+    parser.add_argument("--vmf-variant", "--vmf_variant", type=str, default=None)
+    # Covariance structure of the sentence Gaussian LDA runs to evaluate; unset means the
+    # full-covariance default (src/baselines/params.py normalize_covariance_type).
+    parser.add_argument(
+        "--covariance-type",
+        "--covariance_type",
+        type=str,
+        default=None,
+        choices=["full", "diag", "spherical", "iso", "isotropic", "diagonal"],
+    )
     parser.add_argument(
         "--out_root", type=Path, default=Path("results/topic_analysis/coherence")
     )
@@ -65,6 +77,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dict_exclude_single_alpha", action="store_true")
     parser.add_argument("--dict_exclude_with_digit", action="store_true")
     parser.add_argument("--dict_exclude_hiragana_only", action="store_true")
+    parser.add_argument(
+        "--reference-min-df",
+        "--reference_min_df",
+        type=int,
+        default=0,
+        help=(
+            "Drop evaluation-dictionary words occurring in fewer than this many "
+            "reference-corpus documents. 0 (default) disables the restriction and "
+            "reproduces the historical vocabulary exactly."
+        ),
+    )
+    parser.add_argument(
+        "--reference-max-df-ratio",
+        "--reference_max_df_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Drop evaluation-dictionary words occurring in at least this fraction "
+            "of reference-corpus documents. 1.0 (default) disables the restriction."
+        ),
+    )
     parser.add_argument("--posterior-num-chains", type=int, default=1)
     parser.add_argument("--posterior-burn-in-sweeps", type=int, default=20)
     parser.add_argument("--posterior-retained-samples", type=int, default=20)
@@ -146,6 +179,18 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--checkpoint-root", type=Path, default=None)
+    # The per-token/per-sentence posterior mean is provenance only: nothing in
+    # this repo reads it back (resumability restores from --checkpoint-root
+    # instead). It is also by far the largest artifact -- a single ETM K=300
+    # condition writes 8.5 GB -- so it is not persisted unless asked for.
+    parser.add_argument(
+        "--write-posterior-mean-artifact",
+        action="store_true",
+        help=(
+            "Persist the per-token/per-sentence posterior mean pickle. "
+            "Off by default because it is write-only and dominates disk use."
+        ),
+    )
     parser.add_argument(
         "--reference-count-cache-mode",
         choices=["auto", "off", "refresh"],
@@ -166,6 +211,15 @@ def parse_args() -> argparse.Namespace:
             "continue-and-fail",
         ],
         default="exclude-condition",
+    )
+    parser.add_argument(
+        "--mvtm-empty-topic-policy",
+        choices=["exclude", "fixed-k"],
+        default="exclude",
+        help=(
+            "MvTM empty-topic handling: exclude the iteration, or score active "
+            "topics while retaining requested K in bounded-metric denominators."
+        ),
     )
     parser.add_argument("--language", type=str, default="english")
     parser.add_argument("--delimiter", type=str, default=" / ")

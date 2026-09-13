@@ -42,6 +42,8 @@ DATASET_TARGETS: dict[str, dict[str, list[str]]] = {
             ],
         }
     ),
+    # EACL 2024 の配布 CSV をそのまま読むための別名（本家の train.py と同じカテゴリ定義）。
+    # 文分割だけが本稿の前処理と異なるので、その差の切り分けに使う。
     "nyt": _with_all(
         {
             "arts": ["dance", "music", "movies", "television"],
@@ -74,6 +76,10 @@ DATASET_TARGETS: dict[str, dict[str, list[str]]] = {
         }
     ),
 }
+
+# EACL 2024 の配布 CSV をそのまま読むための別名（本家 train.py と同じカテゴリ定義）。
+# 文分割だけが本稿の前処理と異なるので、その差の切り分けに使う。
+DATASET_TARGETS["20newsgroup_eacl"] = DATASET_TARGETS["20newsgroup"]
 DATASET_ALIASES: dict[str, str] = {}
 
 

@@ -52,6 +52,8 @@ def _signature_checked(target, result, *, record: list | None = None):
         ("gaussianlda", "_word_vector_condition"),
         ("etm", "_load_etm"),
         ("ctm", "_load_ctm"),
+        ("sam", "_load_sam"),
+        ("sam_tf", "_load_sam"),
     ],
 )
 def test_runtime_resolver_routes_all_supported_models(
@@ -107,13 +109,11 @@ def test_runtime_resolver_routes_all_supported_models(
 
     assert result is sentinel
     assert calls and calls[0]["condition_dir"] == tmp_path
-    # vMF experiment dirs are not keyed on the prior-scale variant; baseline
-    # dirs are, and must be told so explicitly even when there is no override.
+    # vMF experiment dirs are keyed on the hyperparameter-sweep label (None selects the
+    # default run); baseline dirs are keyed on the prior-scale variant, and both must be
+    # told so explicitly even when there is no override.
     assert resolver_calls
-    if model == "vmf":
-        assert "parameter_variant" not in resolver_calls[0]
-    else:
-        assert resolver_calls[0]["parameter_variant"] is None
+    assert resolver_calls[0]["parameter_variant"] is None
 
 
 @pytest.mark.parametrize(
@@ -263,6 +263,19 @@ def test_validate_etm_checkpoint_beta_allows_cuda_cpu_numerical_drift() -> None:
     )
 
 
+def test_validate_etm_checkpoint_beta_allows_large_topic_count_drift() -> None:
+    # Regression: K=100 on a 25879-word vocabulary drifts by 5.3e-5 between the
+    # CUDA beta saved at training time and the CPU beta restored for evaluation.
+    # The old 5e-5 tolerance rejected such runs as if the checkpoint were wrong.
+    saved = np.array([[0.7, 0.2, 0.1]], dtype=np.float64)
+    checkpoint = saved + np.array([[5.3e-5, -2.65e-5, -2.65e-5]], dtype=np.float64)
+
+    runtime._validate_etm_checkpoint_beta(
+        saved_beta=saved,
+        checkpoint_beta=checkpoint,
+    )
+
+
 def test_validate_etm_checkpoint_beta_rejects_material_difference() -> None:
     saved = np.array([[0.7, 0.2, 0.1]], dtype=np.float64)
     checkpoint = np.array([[0.6, 0.3, 0.1]], dtype=np.float64)
@@ -346,6 +359,7 @@ def test_runtime_artifacts_use_protocol_specific_iteration_names(
             split="train",
             runtimes_by_iteration=[(3, result)],
             common_meta={"condition_fingerprint": "evaluation-condition"},
+            write_posterior_mean=True,
         )
     )
 
@@ -915,3 +929,26 @@ def test_sentence_gaussian_runtime_encodes_all_documents_once_with_training_batc
     assert encoder.calls[0][0] == ["alpha", "beta", "gamma"]
     assert encoder.calls[0][1]["batch_size"] == 128
     assert [rows.shape[0] for rows in captured["log_likelihood_by_doc"]] == [2, 1]
+
+
+@pytest.mark.parametrize("model", ["bleilda", "etm"])
+def test_runtime_artifacts_omit_posterior_mean_by_default(
+    tmp_path: Path, model: str
+) -> None:
+    # The posterior mean is write-only provenance and dominates disk use
+    # (ETM at K=300 writes 8.5 GB), so it is opt-in.
+    result = _artifact_runtime(protocol="test", with_posterior=True)
+    _, _, iteration_artifacts, _ = _persist_runtime_topic_word_artifacts(
+        out_dir=tmp_path,
+        model=model,
+        split="train",
+        runtimes_by_iteration=[(3, result)],
+        common_meta={"condition_fingerprint": "evaluation-condition"},
+    )
+
+    iteration_dir = tmp_path / "iterations" / "iteration_3"
+    assert not list(iteration_dir.glob("*posterior_mean.pkl"))
+    assert "posterior_mean_pickle" not in iteration_artifacts["3"]
+    # The metrics the summary depends on are still written.
+    assert (iteration_dir / "topic_word_train_expected_counts.pkl").exists()
+    assert (iteration_dir / "topic_word_train_coverage.json").exists()

@@ -785,3 +785,115 @@ def test_vmf_run_output_payload_saves_pickles_and_metrics(tmp_path: Path) -> Non
         load_pickle(saved["table_counts_per_doc"]),
         np.array([[3, 1]], dtype=np.int32),
     )
+
+
+_MINIMAL_REQUEST_OPTIONS = {
+    "train_csvs": ["train.csv"],
+    "test_csvs": ["test.csv"],
+    "logger": logging.getLogger("test"),
+    "encoder_name": "dummy-encoder",
+    "encoder_device": "cpu",
+    "kappa_default": 10.0,
+    "encoder_pre_normalize_transform": "none",
+    "encoder_whitening_eps": 1e-5,
+    "num_iterations": 1,
+    "gibbs_sweeps": 1,
+    "num_samples": 1,
+    "estimate_alpha": False,
+    "alpha_update_every": 1,
+    "alpha_max_iter": 1,
+    "alpha_tol": 1e-5,
+}
+
+
+def test_training_foldin_writes_the_artifacts_the_posthoc_command_recognizes(
+    tmp_path: Path,
+) -> None:
+    """The run function writes fold-in theta for both splits with the shared identity."""
+    from src.data.preprocessing import PreprocessedDocument
+    from src.evaluation.foldin.artifacts import foldin_is_current, read_foldin_meta
+    from src.models import ModelRunRequest
+    from src.models.registry import VmfRequestOptions, _write_training_foldin
+
+    encoder = DummyEncoder(
+        {
+            "a": np.array([1.0, 0.0]),
+            "b": np.array([0.0, 1.0]),
+            "c": np.array([1.0, 1.0]),
+        }
+    )
+    trainer = VMFLDATrainer(
+        corpus=[["a", "b"], ["c"]],
+        encoder=encoder,
+        num_topics=2,
+        alpha=1.0,
+        kappa=10.0,
+        num_components=1,
+        pre_normalize_transform="none",
+        whitening_eps=1e-5,
+        save_path=tmp_path,
+        log=logging.getLogger("test"),
+    )
+    trainer.sample(1, num_sweeps=1, num_samples=1)
+
+    def _doc(sentences: list[str]) -> PreprocessedDocument:
+        tokens = [sentence.split() for sentence in sentences]
+        return PreprocessedDocument(
+            raw_text=" ".join(sentences),
+            sentences_raw=list(sentences),
+            sentences_tokenized=tokens,
+            sentences_joined=[" ".join(item) for item in tokens],
+            document_tokens=[token for item in tokens for token in item],
+        )
+
+    train_docs = [_doc(["a", "b"]), _doc(["c"])]
+    test_docs = [_doc(["b"]), _doc([])]
+    encoded_test = [
+        trainer.inferencer.encode_document(["b"]),
+        trainer.inferencer.encode_document([]),
+    ]
+    options = VmfRequestOptions.from_request_options(
+        {
+            **_MINIMAL_REQUEST_OPTIONS,
+            "output_dir": tmp_path,
+            "condition_fingerprint": "cond-fp",
+        }
+    )
+    request = ModelRunRequest(
+        name="vmf_sentence_lda",
+        category="cat",
+        dataset="dummy",
+        num_topics=2,
+        iteration=0,
+        options={"data_run": "default"},
+    )
+    artifacts = _write_training_foldin(
+        trainer=trainer,
+        options=options,
+        request=request,
+        documents_by_split={"train": train_docs, "test": test_docs},
+        encoded_by_split={"train": trainer.encoded_corpus, "test": encoded_test},
+    )
+
+    assert set(artifacts) == {
+        "train_doc_topic_foldin",
+        "train_doc_topic_foldin_counts",
+        "test_doc_topic_foldin",
+        "test_doc_topic_foldin_counts",
+    }
+    theta_test = load_pickle(tmp_path / "doc_topic_test_foldin.pkl")
+    counts_test = load_pickle(tmp_path / "doc_topic_test_foldin_counts.pkl")
+    assert theta_test.shape == (2, 2)
+    assert np.allclose(theta_test.sum(axis=1), 1.0)
+    assert np.allclose(counts_test.sum(axis=1), [1.0, 0.0])
+    # The empty test document receives the prior mean.
+    alpha = np.asarray(trainer.alpha, dtype=float)
+    assert np.allclose(theta_test[1], alpha / alpha.sum())
+    meta = read_foldin_meta(tmp_path)
+    assert set(meta["splits"]) == {"train", "test"}
+    assert meta["splits"]["train"]["condition_fingerprint"] == "cond-fp"
+    assert meta["splits"]["train"]["written_by"] == "training"
+    for split in ("train", "test"):
+        assert foldin_is_current(
+            tmp_path, split=split, fingerprint=meta["splits"][split]["fingerprint"]
+        )

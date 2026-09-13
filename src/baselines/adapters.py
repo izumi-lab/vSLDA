@@ -14,6 +14,8 @@ from src.baselines.params import (
     parse_gaussianlda_params,
     parse_movmf_params,
     parse_mvtm_params,
+    parse_sam_params,
+    parse_sam_tf_params,
     parse_senclu_params,
     parse_sentence_gaussianlda_params,
     parse_sentlda_params,
@@ -71,6 +73,18 @@ def infer_bleilda(*args: Any, **kwargs: Any) -> Any:
 
 def persist_bleilda_run(*args: Any, **kwargs: Any) -> Any:
     return _call_model_function("bleilda", "persist_bleilda_run", *args, **kwargs)
+
+
+def train_sam(*args: Any, **kwargs: Any) -> Any:
+    return _call_model_function("sam", "train_sam", *args, **kwargs)
+
+
+def infer_sam(*args: Any, **kwargs: Any) -> Any:
+    return _call_model_function("sam", "infer_sam", *args, **kwargs)
+
+
+def persist_sam_run(*args: Any, **kwargs: Any) -> Any:
+    return _call_model_function("sam", "persist_sam_run", *args, **kwargs)
 
 
 def train_bertopic_kmeans(*args: Any, **kwargs: Any) -> Any:
@@ -318,6 +332,44 @@ def run_ctm(request: BaselineRunRequest) -> BaselineArtifacts:
     )
 
 
+def run_sam(request: BaselineRunRequest) -> BaselineArtifacts:
+    adapter_runtime_module.use_legacy_category_behavior = use_legacy_category_behavior
+    return execute_adapter(
+        spec=BaselineAdapterSpec(
+            model="sam",
+            runner_family="sam",
+            train_passes_effective_random_state=True,
+        ),
+        request=request,
+        parse_params=parse_sam_params,
+        train_fn=train_sam,
+        infer_fn=infer_sam,
+        persist_fn=persist_sam_run,
+        save_metadata=_save_runner_metadata,
+        build_persisted_artifacts=_build_persisted_artifacts,
+    )
+
+
+def run_sam_tf(request: BaselineRunRequest) -> BaselineArtifacts:
+    # Same model, same artifacts, different input representation (tf instead of
+    # tf-idf).  A distinct runner key keeps the two result trees apart.
+    adapter_runtime_module.use_legacy_category_behavior = use_legacy_category_behavior
+    return execute_adapter(
+        spec=BaselineAdapterSpec(
+            model="sam_tf",
+            runner_family="sam",
+            train_passes_effective_random_state=True,
+        ),
+        request=request,
+        parse_params=parse_sam_tf_params,
+        train_fn=train_sam,
+        infer_fn=infer_sam,
+        persist_fn=persist_sam_run,
+        save_metadata=_save_runner_metadata,
+        build_persisted_artifacts=_build_persisted_artifacts,
+    )
+
+
 def run_bleilda(request: BaselineRunRequest) -> BaselineArtifacts:
     adapter_runtime_module.use_legacy_category_behavior = use_legacy_category_behavior
     return execute_adapter(
@@ -393,7 +445,9 @@ def run_etm(request: BaselineRunRequest) -> BaselineArtifacts:
 def run_mvtm(request: BaselineRunRequest) -> BaselineArtifacts:
     adapter_runtime_module.use_legacy_category_behavior = use_legacy_category_behavior
     return execute_adapter(
-        spec=BaselineAdapterSpec(model="mvtm", runner_family="mvtm"),
+        spec=BaselineAdapterSpec(
+            model="mvtm", runner_family="mvtm", persist_passes_foldin=True
+        ),
         request=request,
         parse_params=parse_mvtm_params,
         train_fn=train_mvtm,

@@ -49,6 +49,9 @@ def test_vmf_sentence_lda_golden_output() -> None:
         kappa=1.0,
         num_components=1,
         pre_normalize_transform="none",
+        # the golden kappa values are the Banerjee approximation of the plain MCEM
+        saem_burn_in=None,
+        kappa_solver="banerjee",
         log=logging.getLogger("test-vmf-golden"),
         progress=NullProgressReporter(),
     )

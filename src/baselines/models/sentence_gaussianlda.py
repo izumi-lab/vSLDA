@@ -183,6 +183,7 @@ def train_sentence_gaussianlda(
         save_path=None,
         preencode_corpus=params.preencode_corpus,
         prior_scale=params.prior_scale,
+        covariance_type=params.covariance_type,
     )
     trainer.sample(params.num_iterations)
     trainer_state = snapshot_gaussian_trainer(trainer, include_prior_mu=True)
@@ -196,6 +197,11 @@ def train_sentence_gaussianlda(
         table_means=trainer_state.table_means,
         log_determinants=trainer_state.log_determinants,
         table_cholesky_ltriangular_mat=trainer_state.table_cholesky_ltriangular_mat,
+        covariance_type=trainer_state.covariance_type or "full",
+        prior_nu=trainer_state.prior_nu,
+        prior_scale=trainer_state.prior_scale,
+        sum_table_customers=trainer_state.sum_table_customers,
+        sum_squared_table_customers_diag=trainer_state.sum_squared_table_customers_diag,
     )
     return SentenceGaussianLdaTrainResult(
         trainer_state=trainer_state,

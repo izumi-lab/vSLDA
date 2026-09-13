@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from sys import stderr
 from time import perf_counter
@@ -173,6 +174,14 @@ def build_sentence_bow_by_document(
     ]
 
 
+def _reference_restriction_requested(
+    *, reference_min_df: int, reference_max_df_ratio: float
+) -> bool:
+    """Whether the reference-frequency band actually restricts the vocabulary."""
+
+    return int(reference_min_df) > 0 or float(reference_max_df_ratio) < 1.0
+
+
 def build_dictionary_and_corpus(
     texts: list[list[str]],
     *,
@@ -182,7 +191,34 @@ def build_dictionary_and_corpus(
     dict_exclude_single_alpha: bool = False,
     dict_exclude_with_digit: bool = False,
     dict_exclude_hiragana_only: bool = False,
+    reference_document_frequencies: Mapping[str, int] | None = None,
+    reference_num_docs: int | None = None,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
 ) -> tuple[Dictionary, list[list[tuple[int, int]]]]:
+    """Build the evaluation dictionary.
+
+    ``reference_min_df`` / ``reference_max_df_ratio`` optionally restrict the
+    vocabulary by document frequency in the *reference* corpus used for
+    coherence. The defaults (0 and 1.0) disable the restriction, so the
+    dictionary is byte-for-byte identical to the pre-existing behaviour.
+    """
+
+    reference_restricted = _reference_restriction_requested(
+        reference_min_df=reference_min_df,
+        reference_max_df_ratio=reference_max_df_ratio,
+    )
+    if reference_restricted:
+        if reference_document_frequencies is None or reference_num_docs is None:
+            raise ValueError(
+                "reference_document_frequencies and reference_num_docs are required "
+                "when reference_min_df or reference_max_df_ratio restricts V_eval"
+            )
+        if int(reference_num_docs) <= 0:
+            raise ValueError(
+                f"reference_num_docs must be positive, got {reference_num_docs}"
+            )
+
     dictionary = Dictionary(texts)
     dictionary.filter_extremes(no_below=dict_no_below, no_above=dict_no_above)
     if (
@@ -190,22 +226,45 @@ def build_dictionary_and_corpus(
         or dict_exclude_single_alpha
         or dict_exclude_with_digit
         or dict_exclude_hiragana_only
+        or reference_restricted
     ):
+        # ratio 1.0 documents "no upper bound"; keeping a threshold there would
+        # drop tokens present in every reference document as soon as a min_df is
+        # requested.
+        max_reference_df = (
+            None
+            if not reference_restricted or float(reference_max_df_ratio) >= 1.0
+            else float(reference_max_df_ratio) * int(reference_num_docs)
+        )
         bad_ids: list[int] = []
         for token, token_id in dictionary.token2id.items():
             is_single_alpha = bool(SINGLE_ASCII_ALPHA_RE.fullmatch(token))
             has_digit = any(ch.isdigit() for ch in token)
             is_hiragana_only = bool(HIRAGANA_ONLY_RE.fullmatch(token))
+            outside_reference_band = False
+            if reference_restricted:
+                assert reference_document_frequencies is not None
+                token_df = int(reference_document_frequencies.get(token, 0))
+                outside_reference_band = token_df < int(reference_min_df) or (
+                    max_reference_df is not None and token_df >= max_reference_df
+                )
             if (
                 (token in dict_exclude_tokens)
                 or (dict_exclude_single_alpha and is_single_alpha)
                 or (dict_exclude_with_digit and has_digit)
                 or (dict_exclude_hiragana_only and is_hiragana_only)
+                or outside_reference_band
             ):
                 bad_ids.append(token_id)
         if bad_ids:
             dictionary.filter_tokens(bad_ids=bad_ids)
             dictionary.compactify()
+    if not dictionary:
+        raise ValueError(
+            "Evaluation dictionary is empty after filtering; "
+            f"reference_min_df={reference_min_df} "
+            f"reference_max_df_ratio={reference_max_df_ratio}"
+        )
     corpus_bow = [dictionary.doc2bow(doc) for doc in texts]
     return dictionary, corpus_bow
 
@@ -406,6 +465,10 @@ def build_corpus_bundle(
     exclude_labels: set[str] | None = None,
     split_csvs: tuple[str, ...] | None = None,
     target_column: str = "target_str",
+    reference_document_frequencies: Mapping[str, int] | None = None,
+    reference_num_docs: int | None = None,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
 ) -> tuple[list[list[str]], Dictionary, list[list[tuple[int, int]]]]:
     documents = load_documents(
         dataset=dataset,
@@ -432,5 +495,9 @@ def build_corpus_bundle(
         dict_exclude_single_alpha=dict_exclude_single_alpha,
         dict_exclude_with_digit=dict_exclude_with_digit,
         dict_exclude_hiragana_only=dict_exclude_hiragana_only,
+        reference_document_frequencies=reference_document_frequencies,
+        reference_num_docs=reference_num_docs,
+        reference_min_df=reference_min_df,
+        reference_max_df_ratio=reference_max_df_ratio,
     )
     return texts, dictionary, corpus_bow

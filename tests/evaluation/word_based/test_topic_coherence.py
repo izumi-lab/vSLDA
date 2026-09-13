@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,84 @@ def test_word_based_output_identity_includes_prior_scale() -> None:
     assert "__psi0-0p1__" in point_one[0]
     assert "__psi0-3__" in three[0]
     assert point_one[1] != three[1]
+
+
+def _condition_id_common() -> dict:
+    return dict(
+        model="vmf",
+        dataset="dummy",
+        data_run="default",
+        category="all",
+        iterations=[0],
+        num_topics=10,
+        coherence="c_npmi",
+        coherence_topn=10,
+        coherence_window_size=10,
+        coherence_implementation="project_epsilon_smoothed",
+        coherence_min_window_count=None,
+        coherence_reference="dataset",
+        coherence_reference_path=None,
+        coherence_reference_format=None,
+        coherence_reference_max_docs=None,
+        coherence_reference_min_doc_tokens=1,
+        coherence_reference_streaming=False,
+        diversity_topn=25,
+        coherence_split="train",
+        topic_word_source="test",
+        embedding_variant="minilm",
+        metric_names=["coherence_c_npmi", "topic_diversity"],
+    )
+
+
+def test_reference_band_defaults_keep_condition_ids_unchanged() -> None:
+    """The band is opt-in: defaults must not perturb historical identities."""
+
+    common = _condition_id_common()
+    historical = build_output_condition_id(**common)
+    explicit_defaults = build_output_condition_id(
+        **common,
+        dict_no_above=0.7,
+        reference_min_df=0,
+        reference_max_df_ratio=1.0,
+    )
+
+    assert historical == explicit_defaults
+
+
+def test_reference_band_separates_the_filtered_arm() -> None:
+    common = _condition_id_common()
+    historical = build_output_condition_id(**common)
+    filtered = build_output_condition_id(
+        **common,
+        dict_no_above=1.0,
+        reference_min_df=50,
+        reference_max_df_ratio=0.30,
+    )
+
+    assert "__refdf50-30__" in filtered[0]
+    assert filtered[0] != historical[0]
+    assert filtered[1] != historical[1]
+
+
+def test_reference_band_settings_are_distinguished_from_each_other() -> None:
+    common = _condition_id_common()
+    lenient = build_output_condition_id(
+        **common, reference_min_df=50, reference_max_df_ratio=0.30
+    )
+    strict = build_output_condition_id(
+        **common, reference_min_df=100, reference_max_df_ratio=0.10
+    )
+
+    assert lenient[1] != strict[1]
+    assert "__refdf100-10__" in strict[0]
+
+
+def test_relaxing_dict_no_above_alone_separates_the_arm() -> None:
+    common = _condition_id_common()
+    historical = build_output_condition_id(**common)
+    relaxed = build_output_condition_id(**common, dict_no_above=1.0)
+
+    assert relaxed[1] != historical[1]
 
 
 def _set_fixed_now(
@@ -257,6 +336,75 @@ def test_run_topic_coherence_analysis_persists_model_provenance(
 
     assert not (tmp_path / "summary_metrics.csv").exists()
     assert not (tmp_path / "summary_metrics.json").exists()
+
+
+def test_run_topic_coherence_analysis_scores_mvtm_empty_topics_with_fixed_k(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics._uses_default_output_layout",
+        lambda _out_root: True,
+    )
+    dictionary = Dictionary([["alpha"], ["beta"]])
+    runtime = replace(
+        _runtime_topic_words(
+            topic_words=[[("alpha", 1.0)], []],
+            model="mvtm",
+        ),
+        empty_topic_ids=(1,),
+    )
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.build_corpus_bundle",
+        lambda **_kwargs: (
+            [["alpha"], ["beta"]],
+            dictionary,
+            [[(0, 1)], [(1, 1)]],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.resolve_runtime_topic_words",
+        lambda **_kwargs: runtime,
+    )
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.evaluate_topic_words",
+        lambda **kwargs: (
+            {"coherence": 0.6, "diversity": 1.0}
+            if kwargs["topic_words"] == [[("alpha", 1.0)]]
+            else pytest.fail("fixed-K scoring must remove empty rows before scoring")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.evaluation.word_based.metrics.resolve_model_provenance",
+        lambda **kwargs: {"model_key": kwargs["model"]},
+    )
+
+    run_topic_coherence_analysis(
+        models=["mvtm"],
+        dataset="dummy",
+        data_runs=["default"],
+        iterations=[0],
+        num_topics=2,
+        categories=["all"],
+        out_root=tmp_path,
+        coherence_topn=1,
+        diversity_topn=1,
+        mvtm_empty_topic_policy="fixed-k",
+    )
+
+    metrics_path = next((tmp_path / "archive").rglob("metrics_agg.json"))
+    metrics_meta, metrics_results = read_evaluation_json(metrics_path)
+    aggregate = metrics_results["aggregate"]
+    assert aggregate["coherence"]["mean"] == 0.3
+    assert aggregate["coherence_active_only"]["mean"] == 0.6
+    assert aggregate["diversity"]["mean"] == 0.5
+    assert aggregate["diversity_active_only"]["mean"] == 1.0
+    assert aggregate["topic_utilization"]["mean"] == 0.5
+    assert aggregate["num_empty_topics"]["mean"] == 1.0
+    assert aggregate["complete_run_rate"]["mean"] == 0.0
+    assert metrics_meta["empty_topic_evaluation"]["applied_policy"] == "fixed-k"
+    assert metrics_meta["empty_topic_ids_by_iteration"] == {"0": [1]}
+    assert metrics_meta["evaluated_iterations"] == [0]
 
 
 def test_run_topic_coherence_analysis_skip_existing_respects_settings(

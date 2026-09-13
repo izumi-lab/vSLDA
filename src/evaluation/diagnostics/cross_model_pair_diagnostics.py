@@ -19,6 +19,7 @@ from src.core.paths import (
     write_latest_result_pointer,
 )
 from src.core.result_identity import build_condition_id, build_execution_id
+from src.core.vmf_assignment import DEFAULT_VMF_ASSIGNMENT
 from src.data.catalog import DATASET_TARGETS, resolve_dataset_dir
 from src.evaluation.model_provenance import load_model_provenance_for_artifact
 from src.evaluation.reporting import write_csv_rows, write_evaluation_json
@@ -314,7 +315,7 @@ def run_vmf_vs_baseline_pair_analysis(
     row_normalize: bool = True,
     dump_vectors: bool = False,
     seed: int | None = DEFAULT_RANDOM_SEED,
-    vmf_assignment: str = "hard",
+    vmf_assignment: str = DEFAULT_VMF_ASSIGNMENT,
     vmf_condition_id: str | None = None,
     vmf_num_components: int | None = None,
     vmf_embedding_variant: str | None = None,
@@ -606,7 +607,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-topics", type=int, default=20)
     parser.add_argument("--split", choices=["train", "test"], default="train")
     parser.add_argument("--data-run", default="default")
-    parser.add_argument("--vmf-assignment", choices=["hard", "soft"], default="hard")
+    parser.add_argument(
+        "--vmf-assignment",
+        choices=["hard", "soft", "foldin", "foldincounts"],
+        default=DEFAULT_VMF_ASSIGNMENT,
+    )
     parser.add_argument("--vmf-condition-id", default=None)
     parser.add_argument("--vmf-num-components", type=int, default=None)
     parser.add_argument("--vmf-embedding-variant", default=None)

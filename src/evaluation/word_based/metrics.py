@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,10 @@ from typing import Literal
 
 from gensim.corpora import Dictionary
 
-from src.baselines.params import format_prior_scale_variant
+from src.baselines.params import (
+    format_prior_scale_variant,
+    normalize_covariance_type,
+)
 from src.core.artifacts import save_json, save_pickle
 from src.core.paths import (
     build_archive_result_dir,
@@ -20,6 +24,7 @@ from src.core.paths import (
     write_latest_result_pointer,
 )
 from src.core.result_identity import build_execution_id
+from src.core.vmf_variant import normalize_vmf_parameter_variant
 from src.evaluation.reporting import write_evaluation_json
 from src.evaluation.schema import build_evaluation_meta
 from src.evaluation.word_based import cli as cli_module
@@ -39,6 +44,9 @@ from src.evaluation.word_based.reference_counts import (
     collect_target_words,
     compute_shared_reference_coherence_scores,
     effective_window_sizes_for_coherences,
+)
+from src.evaluation.word_based.reference_df import (
+    load_reference_document_frequencies,
 )
 from src.evaluation.word_based.reference_query import build_reference_count_query
 from src.evaluation.word_based.resumability import (
@@ -67,6 +75,7 @@ from src.evaluation.word_based.topic_word_metrics import (
     PALMETTO_CV_IMPLEMENTATION,
     STREAMING_REFERENCE_COHERENCES,
     aggregate_metrics,
+    apply_fixed_k_empty_topic_policy,
     coherence_metric_key,
     compute_streaming_reference_coherence_scores,
     compute_topic_diversity,
@@ -109,6 +118,8 @@ ModelType = Literal[
     "gaussian_kmeans",
     "movmf",
     "gaussian_mixture",
+    "sam",
+    "sam_tf",
 ]
 
 ANALYSIS_ROOT = model_inputs_module.ANALYSIS_ROOT
@@ -116,7 +127,7 @@ DEFAULT_OUT_ROOT = model_inputs_module.DEFAULT_OUT_ROOT
 DEFAULT_EMBEDDING_VARIANT = model_inputs_module.DEFAULT_EMBEDDING_VARIANT
 MODEL_ALIASES = model_inputs_module.MODEL_ALIASES
 MODEL_CHOICES = model_inputs_module.MODEL_CHOICES
-RUNTIME_TOPIC_WORD_MODELS = COLLAPSED_MODELS | {"etm", "ctm"}
+RUNTIME_TOPIC_WORD_MODELS = COLLAPSED_MODELS | {"etm", "ctm", "sam", "sam_tf"}
 
 
 def _topic_word_score_mode(args: argparse.Namespace) -> str:
@@ -202,6 +213,7 @@ def build_result_dir(
     num_topics: int | list[int] | tuple[int, ...],
     category: str,
     data_run: str = "default",
+    vmf_variant: str | None = None,
 ) -> Path:
     return model_inputs_module.build_result_dir(
         model=model,
@@ -210,6 +222,7 @@ def build_result_dir(
         num_topics=num_topics,
         category=category,
         data_run=data_run,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -241,6 +254,8 @@ def resolve_model_provenance(
     data_run: str = "default",
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> dict[str, object]:
     return model_inputs_module.resolve_model_provenance(
         model=model,
@@ -251,6 +266,8 @@ def resolve_model_provenance(
         data_run=data_run,
         embedding_variant=embedding_variant,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -283,9 +300,13 @@ def _build_output_condition_id(
     posterior_settings: dict[str, object] | None = None,
     topic_word_score_mode: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
     source_condition_id: str | None = None,
     source_condition_fingerprint: str | None = None,
     parameter_variant: str | None = None,
+    dict_no_above: float | None = None,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
 ) -> tuple[str, str]:
     return reporting_module.build_output_condition_id(
         model=model,
@@ -316,9 +337,13 @@ def _build_output_condition_id(
         topic_word_score_mode=topic_word_score_mode,
         topic_word_ranking_schema_version=TOPIC_WORD_RANKING_SCHEMA_VERSION,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
         source_condition_id=source_condition_id,
         source_condition_fingerprint=source_condition_fingerprint,
         parameter_variant=parameter_variant,
+        dict_no_above=dict_no_above,
+        reference_min_df=reference_min_df,
+        reference_max_df_ratio=reference_max_df_ratio,
     )
 
 
@@ -349,6 +374,8 @@ def _resolve_split_csvs_and_target_column(
     split: str,
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> tuple[tuple[str, ...] | None, str]:
     return model_inputs_module.resolve_split_csvs_and_target_column(
         model=model,
@@ -360,6 +387,8 @@ def _resolve_split_csvs_and_target_column(
         split=split,
         embedding_variant=embedding_variant,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -501,6 +530,10 @@ def build_corpus_bundle(
     exclude_labels: set[str] | None = None,
     split_csvs: tuple[str, ...] | None = None,
     target_column: str = "target_str",
+    reference_document_frequencies: Mapping[str, int] | None = None,
+    reference_num_docs: int | None = None,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
 ) -> tuple[list[list[str]], Dictionary, list[list[tuple[int, int]]]]:
     return corpus_bundle_module.build_corpus_bundle(
         dataset=dataset,
@@ -521,6 +554,10 @@ def build_corpus_bundle(
         exclude_labels=exclude_labels,
         split_csvs=split_csvs,
         target_column=target_column,
+        reference_document_frequencies=reference_document_frequencies,
+        reference_num_docs=reference_num_docs,
+        reference_min_df=reference_min_df,
+        reference_max_df_ratio=reference_max_df_ratio,
     )
 
 
@@ -559,6 +596,7 @@ def load_doc_topics(
     split: str,
     prefer_soft: bool = False,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ):
     return model_inputs_module.load_doc_topics(
         model=model,
@@ -570,6 +608,7 @@ def load_doc_topics(
         split=split,
         prefer_soft=prefer_soft,
         embedding_variant=embedding_variant,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -592,6 +631,7 @@ def resolve_sentence_topics_path(
     category: str,
     split: str,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> Path:
     return model_inputs_module.resolve_sentence_topics_path(
         model=model,
@@ -602,6 +642,7 @@ def resolve_sentence_topics_path(
         category=category,
         split=split,
         embedding_variant=embedding_variant,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -646,6 +687,48 @@ def _dict_exclude_tokens(args: argparse.Namespace) -> frozenset[str]:
     return frozenset(str(token) for token in raw)
 
 
+def _reference_min_df(args: argparse.Namespace) -> int:
+    return int(getattr(args, "reference_min_df", 0) or 0)
+
+
+def _reference_max_df_ratio(args: argparse.Namespace) -> float:
+    value = getattr(args, "reference_max_df_ratio", 1.0)
+    return 1.0 if value is None else float(value)
+
+
+def _reference_band_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    """Arguments that restrict V_eval by reference-corpus document frequency.
+
+    Returns an empty mapping when the band is inactive so the (expensive)
+    document frequency table is never built for default runs.
+    """
+
+    if not _restricts_evaluation_vocabulary(args):
+        return {}
+    reference_path = getattr(args, "coherence_reference_path", None)
+    if reference_path is None:
+        raise ValueError(
+            "--coherence_reference_path is required when --reference-min-df or "
+            "--reference-max-df-ratio restricts the evaluation vocabulary"
+        )
+    table = load_reference_document_frequencies(
+        resolve_project_path(reference_path),
+        max_docs=getattr(args, "coherence_reference_max_docs", None),
+        min_doc_tokens=int(getattr(args, "coherence_reference_min_doc_tokens", 1)),
+        cache_root=Path(args.out_root) / ".cache",
+    )
+    return {
+        "reference_document_frequencies": table.document_frequencies,
+        "reference_num_docs": table.num_docs,
+        "reference_min_df": _reference_min_df(args),
+        "reference_max_df_ratio": _reference_max_df_ratio(args),
+    }
+
+
+def _restricts_evaluation_vocabulary(args: argparse.Namespace) -> bool:
+    return _reference_min_df(args) > 0 or _reference_max_df_ratio(args) < 1.0
+
+
 def _isolates_condition_failures(args: argparse.Namespace) -> bool:
     return (
         str(getattr(args, "condition_failure_policy", "exclude-condition"))
@@ -687,6 +770,8 @@ def _topic_word_checkpoint_identity(
         data_run=data_run,
         embedding_variant=_effective_embedding_variant_for_model(model, args),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
+        vmf_variant=_effective_vmf_variant_for_model(model, args),
     )
     identity = {
         "schema_version": 1,
@@ -699,6 +784,8 @@ def _topic_word_checkpoint_identity(
         "iteration": int(iteration),
         "embedding_variant": _effective_embedding_variant_for_model(model, args),
         "prior_scale": _effective_prior_scale_for_model(model, args),
+        "covariance_type": _effective_covariance_type_for_model(model, args),
+        "vmf_variant": _effective_vmf_variant_for_model(model, args),
         "split": args.coherence_split,
         "topic_word_topn": _requested_topic_word_topn(args),
         "language": args.language,
@@ -808,6 +895,8 @@ def _persist_partial_topic_words(
             data_run=task.data_run,
             embedding_variant=_effective_embedding_variant_for_model(task.model, args),
             prior_scale=_effective_prior_scale_for_model(task.model, args),
+            covariance_type=_effective_covariance_type_for_model(task.model, args),
+            vmf_variant=_effective_vmf_variant_for_model(task.model, args),
         )
     empty_topic_ids = [int(topic_id) for topic_id in runtime.empty_topic_ids]
     common_meta: dict[str, object] = {
@@ -969,6 +1058,77 @@ def _metric_names_for_coherences(coherences: list[str]) -> list[str]:
     ] + ["diversity"]
 
 
+def _uses_mvtm_fixed_k_policy(args: argparse.Namespace, *, model: str) -> bool:
+    return (
+        model == "mvtm"
+        and str(getattr(args, "mvtm_empty_topic_policy", "exclude")) == "fixed-k"
+    )
+
+
+def _uses_fixed_k_reporting(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "mvtm_empty_topic_policy", "exclude")) == "fixed-k"
+
+
+def _fixed_k_metric_names(coherences: list[str]) -> list[str]:
+    base_names = _metric_names_for_coherences(coherences)
+    coherence_names = base_names[:-1]
+    return [
+        *base_names,
+        *(f"{name}_active_only" for name in coherence_names),
+        "diversity_active_only",
+        "topic_utilization",
+        "num_active_topics",
+        "num_empty_topics",
+        "complete_run_rate",
+    ]
+
+
+def _apply_fixed_k_reporting(
+    *,
+    metrics: dict[str, float],
+    topic_words: TopicWords,
+    coherences: list[str],
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    return apply_fixed_k_empty_topic_policy(
+        active_metrics=metrics,
+        topic_words=topic_words,
+        coherences=coherences,
+        diversity_topn=int(args.diversity_topn),
+    )
+
+
+def _empty_topic_policy_meta(
+    *, args: argparse.Namespace, model: str
+) -> dict[str, object]:
+    requested_policy = str(getattr(args, "mvtm_empty_topic_policy", "exclude"))
+    applied_policy = (
+        "fixed-k" if _uses_mvtm_fixed_k_policy(args, model=model) else "exclude"
+    )
+    return {
+        "requested_mvtm_policy": requested_policy,
+        "applied_policy": applied_policy,
+        "scope": "mvtm",
+        "standard_metric_keys": (
+            "fixed_k_for_c_v_c_npmi_doc_npmi; active_only_for_unbounded_coherence"
+            if requested_policy == "fixed-k"
+            else "complete_topics_only"
+        ),
+        "empty_topic_values": {
+            "c_v": 0.0,
+            "c_npmi": -1.0,
+            "doc_npmi": -1.0,
+            "c_uci": "active_only_unbounded",
+            "u_mass": "active_only_unbounded",
+        },
+        "diversity_denominator": (
+            "requested_num_topics_times_diversity_topn"
+            if requested_policy == "fixed-k"
+            else "emitted_topic_word_slots"
+        ),
+    }
+
+
 def _coherence_from_metric_name(
     metric_name: str,
     *,
@@ -1064,6 +1224,8 @@ def _single_coherence_meta(
         "dict_exclude_single_alpha": bool(args.dict_exclude_single_alpha),
         "dict_exclude_with_digit": bool(args.dict_exclude_with_digit),
         "dict_exclude_hiragana_only": bool(args.dict_exclude_hiragana_only),
+        "reference_min_df": _reference_min_df(args),
+        "reference_max_df_ratio": _reference_max_df_ratio(args),
         "language": args.language,
         "delimiter": args.delimiter,
         "ja_replace_num": bool(args.ja_replace_num),
@@ -1135,6 +1297,16 @@ def _effective_embedding_variant_for_model(
     )
 
 
+def _effective_vmf_variant_for_model(
+    model: str,
+    args: argparse.Namespace,
+) -> str | None:
+    """Requested hyperparameter-sweep label of the vMF runs (None = default runs)."""
+    if model not in {"vmf", "vmf_sentence_lda"}:
+        return None
+    return normalize_vmf_parameter_variant(getattr(args, "vmf_variant", None))
+
+
 def _effective_prior_scale_for_model(
     model: str,
     args: argparse.Namespace,
@@ -1143,6 +1315,19 @@ def _effective_prior_scale_for_model(
         return None
     value = getattr(args, "prior_scale", None)
     return None if value is None else float(value)
+
+
+def _effective_covariance_type_for_model(
+    model: str,
+    args: argparse.Namespace,
+) -> str | None:
+    """Requested covariance type of the sentence Gaussian LDA (None = full / unset)."""
+    if model not in {"sentence_gaussianlda", "gaussian"}:
+        return None
+    value = getattr(args, "covariance_type", None)
+    if value is None:
+        return None
+    return normalize_covariance_type(value)
 
 
 def _uses_default_output_layout(out_root: Path) -> bool:
@@ -1161,12 +1346,16 @@ def _expected_topic_word_identity(
             return "variational_word_topic_npmi"
         if model == "ctm":
             return "ctm_variational_word_topic_npmi"
+        if model in {"sam", "sam_tf"}:
+            return "sam_positive_part_word_topic_npmi"
     if model in COLLAPSED_MODELS:
         return "posthoc_expected_p_w_given_topic"
     if model == "etm":
         return "native_etm_beta"
     if model == "ctm":
         return "native_ctm_decoder_topic_word_distribution"
+    if model in {"sam", "sam_tf"}:
+        return "native_sam_signed_topic_direction"
     raise ValueError(f"Unsupported model for coherence analysis: {model}")
 
 
@@ -1192,6 +1381,8 @@ def _expected_output_condition_id(
         data_run=data_run,
         embedding_variant=_effective_embedding_variant_for_model(model, args),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
+        vmf_variant=_effective_vmf_variant_for_model(model, args),
     )
     return _build_output_condition_id(
         model=model,
@@ -1240,6 +1431,7 @@ def _expected_output_condition_id(
         topic_word_source=topic_word_source,
         embedding_variant=_effective_embedding_variant_for_model(model, args),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
         source_condition_id=(
             None
             if provenance.get("condition_id") is None
@@ -1259,6 +1451,9 @@ def _expected_output_condition_id(
         dict_exclude_tokens=_dict_exclude_tokens(args),
         posterior_settings=_posterior_settings(args),
         topic_word_score_mode=_topic_word_score_mode(args),
+        dict_no_above=float(args.dict_no_above),
+        reference_min_df=_reference_min_df(args),
+        reference_max_df_ratio=_reference_max_df_ratio(args),
     )
 
 
@@ -1436,6 +1631,9 @@ def _effective_coherence_min_window_count(
 def _validate_reference_args(args: argparse.Namespace) -> None:
     if getattr(args, "prior_scale", None) is not None:
         format_prior_scale_variant(float(args.prior_scale))
+    if getattr(args, "covariance_type", None) is not None:
+        normalize_covariance_type(args.covariance_type)
+    normalize_vmf_parameter_variant(getattr(args, "vmf_variant", None))
     _coherence_count_backend(args)
     _coherence_count_workers(args)
     _coherence_count_chunk_size(args)
@@ -1624,6 +1822,10 @@ def _get_corpus_bundle_cached(
     exclude_labels: set[str] | None = None,
     split_csvs: tuple[str, ...] | None = None,
     target_column: str = "target_str",
+    reference_document_frequencies: Mapping[str, int] | None = None,
+    reference_num_docs: int | None = None,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
 ) -> tuple[list[list[str]], Dictionary, list[list[tuple[int, int]]]]:
     exclude_key = tuple(sorted(exclude_labels)) if exclude_labels else None
     cache_key = (
@@ -1646,6 +1848,8 @@ def _get_corpus_bundle_cached(
         exclude_key,
         split_csvs,
         target_column,
+        int(reference_min_df),
+        float(reference_max_df_ratio),
     )
     if cache_key in cache:
         return cache[cache_key]
@@ -1668,6 +1872,10 @@ def _get_corpus_bundle_cached(
         exclude_labels=exclude_labels,
         split_csvs=split_csvs,
         target_column=target_column,
+        reference_document_frequencies=reference_document_frequencies,
+        reference_num_docs=reference_num_docs,
+        reference_min_df=reference_min_df,
+        reference_max_df_ratio=reference_max_df_ratio,
     )
     cache[cache_key] = bundle
     return bundle
@@ -1775,6 +1983,8 @@ def _resolve_topic_words_result(
         ),
         encoder_batch_size_override=getattr(args, "topic_word_encode_batch_size", None),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
+        vmf_variant=_effective_vmf_variant_for_model(model, args),
     )
     result = _metric_topic_words_result(args=args, runtime=runtime)
     return result, texts, dictionary, corpus_bow
@@ -1788,6 +1998,7 @@ def _persist_runtime_topic_word_artifacts(
     runtimes_by_iteration: list[tuple[int, RuntimeTopicWords]],
     common_meta: dict[str, object],
     evaluation_score_mode: str = "topic_word_probability",
+    write_posterior_mean: bool = False,
 ) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
     if not runtimes_by_iteration:
         raise ValueError("No runtime topic-word results to persist.")
@@ -1881,7 +2092,7 @@ def _persist_runtime_topic_word_artifacts(
         iteration_dir = out_dir / "iterations" / f"iteration_{iteration}"
         ensure_directory(iteration_dir)
         artifacts: dict[str, str] = {}
-        if runtime.posterior_mean_by_doc is not None:
+        if write_posterior_mean and runtime.posterior_mean_by_doc is not None:
             prefix = (
                 f"etm_token_topic_{split}_posterior_mean"
                 if model == "etm"
@@ -1914,6 +2125,16 @@ def _persist_runtime_topic_word_artifacts(
             "iteration": int(iteration),
             "protocol": runtime.protocol,
             "coverage": runtime.coverage,
+            "empty_topic_ids": [int(topic_id) for topic_id in runtime.empty_topic_ids],
+            "num_active_topics": int(len(runtime.display_topic_words))
+            - len(runtime.empty_topic_ids),
+            "num_empty_topics": len(runtime.empty_topic_ids),
+            "topic_utilization": (
+                (len(runtime.display_topic_words) - len(runtime.empty_topic_ids))
+                / len(runtime.display_topic_words)
+                if runtime.display_topic_words
+                else float("nan")
+            ),
             "source_condition_dir": str(runtime.condition_dir),
             "source_condition_fingerprint": runtime.source_condition_fingerprint,
             "evaluation_vocabulary_fingerprint": runtime.vocabulary_fingerprint,
@@ -1941,6 +2162,19 @@ def _persist_runtime_topic_word_artifacts(
             str(iteration): runtime.execution_metadata
             for iteration, runtime in runtimes_by_iteration
             if runtime.execution_metadata is not None
+        },
+        "empty_topic_ids_by_iteration": {
+            str(iteration): [int(topic_id) for topic_id in runtime.empty_topic_ids]
+            for iteration, runtime in runtimes_by_iteration
+        },
+        "topic_utilization_by_iteration": {
+            str(iteration): (
+                (len(runtime.display_topic_words) - len(runtime.empty_topic_ids))
+                / len(runtime.display_topic_words)
+                if runtime.display_topic_words
+                else float("nan")
+            )
+            for iteration, runtime in runtimes_by_iteration
         },
     }
     return evaluation_path, display_path, iteration_artifacts, runtime_meta
@@ -1996,6 +2230,8 @@ def _write_word_based_group_outputs(
         data_run=data_run,
         embedding_variant=_effective_embedding_variant_for_model(model, args),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
+        vmf_variant=_effective_vmf_variant_for_model(model, args),
     )
     condition_id, condition_fingerprint = _build_output_condition_id(
         model=model,
@@ -2041,6 +2277,7 @@ def _write_word_based_group_outputs(
         topic_word_source=topic_word_source,
         embedding_variant=_effective_embedding_variant_for_model(model, args),
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
         source_condition_id=(
             None
             if provenance.get("condition_id") is None
@@ -2060,6 +2297,9 @@ def _write_word_based_group_outputs(
         dict_exclude_tokens=_dict_exclude_tokens(args),
         posterior_settings=_posterior_settings(args),
         topic_word_score_mode=_topic_word_score_mode(args),
+        dict_no_above=float(args.dict_no_above),
+        reference_min_df=_reference_min_df(args),
+        reference_max_df_ratio=_reference_max_df_ratio(args),
     )
     display_key = condition_id
     started_at = datetime.now(UTC).isoformat()
@@ -2130,6 +2370,7 @@ def _write_word_based_group_outputs(
         embedding_variant=requested_embedding_variant,
         effective_embedding_variant=effective_embedding_variant,
         prior_scale=_effective_prior_scale_for_model(model, args),
+        covariance_type=_effective_covariance_type_for_model(model, args),
         iterations=used_iterations,
         started_at=started_at,
         execution_id=execution_id,
@@ -2175,6 +2416,9 @@ def _write_word_based_group_outputs(
         model=model,
         split=args.coherence_split,
         runtimes_by_iteration=runtime_iterations,
+        write_posterior_mean=bool(
+            getattr(args, "write_posterior_mean_artifact", False)
+        ),
         common_meta={
             "dataset": args.dataset,
             "data_run": data_run,
@@ -2193,6 +2437,10 @@ def _write_word_based_group_outputs(
         TOPIC_WORD_RANKING_SCHEMA_VERSION
     )
     metrics_meta["posterior_settings"] = _posterior_settings(args)
+    metrics_meta["empty_topic_evaluation"] = _empty_topic_policy_meta(
+        args=args,
+        model=model,
+    )
     metrics_meta["requested_iterations"] = [int(value) for value in args.iteration]
     metrics_meta["evaluated_iterations"] = [int(value) for value in used_iterations]
     metrics_meta["degenerate_iterations"] = sorted(
@@ -2380,6 +2628,8 @@ def _write_word_based_group_outputs(
                 "embedding_variant": requested_embedding_variant,
                 "effective_embedding_variant": effective_embedding_variant,
                 "prior_scale": _effective_prior_scale_for_model(model, args),
+                "covariance_type": _effective_covariance_type_for_model(model, args),
+                "vmf_variant": _effective_vmf_variant_for_model(model, args),
                 "topic_word_source": topic_word_source,
                 "topic_word_score_mode": topic_word_score_mode,
             }
@@ -2463,6 +2713,7 @@ def _collect_pending_word_based_group(
             split=local_args.coherence_split,
             embedding_variant=_effective_embedding_variant_for_model(model, local_args),
             prior_scale=_effective_prior_scale_for_model(model, local_args),
+            vmf_variant=_effective_vmf_variant_for_model(model, local_args),
         )
         (
             topic_word_texts,
@@ -2489,6 +2740,7 @@ def _collect_pending_word_based_group(
             exclude_labels=None,
             split_csvs=split_csvs,
             target_column=resolved_target_column,
+            **_reference_band_kwargs(local_args),
         )
         ordered_vocabulary = [
             str(topic_word_dictionary[index])
@@ -2586,7 +2838,10 @@ def _collect_pending_word_based_group(
                 )
         assert isinstance(topic_words_result.runtime_payload, RuntimeTopicWords)
         runtime = topic_words_result.runtime_payload
-        if runtime.empty_topic_ids:
+        if runtime.empty_topic_ids and not _uses_mvtm_fixed_k_policy(
+            local_args,
+            model=model,
+        ):
             partial_pointer = _persist_partial_topic_words(
                 args=local_args,
                 task=task,
@@ -2622,6 +2877,12 @@ def _collect_pending_word_based_group(
                 list(runtime.empty_topic_ids),
             )
             continue
+        if runtime.empty_topic_ids:
+            logger.warning(
+                "wb %s MvTM fixed-K evaluation includes empty topics ids=%s",
+                condition_progress,
+                list(runtime.empty_topic_ids),
+            )
         topic_word_source = topic_words_result.topic_word_source
         topic_word_score_mode = topic_words_result.score_mode or ""
         topic_word_score_definition = topic_words_result.score_definition or ""
@@ -2679,9 +2940,19 @@ def _score_pending_word_based_group(
     per_iter_topic_words: list[dict[str, object]] = []
     used_iterations: list[int] = []
     for pending_iteration in group.iterations:
+        fixed_k_reporting = _uses_fixed_k_reporting(local_args)
+        scoring_topic_words = (
+            [topic for topic in pending_iteration.topic_words if topic]
+            if fixed_k_reporting
+            else pending_iteration.topic_words
+        )
         metrics = compute_shared_reference_coherence_scores(
-            topic_words=pending_iteration.topic_words,
-            metric_names=metric_names,
+            topic_words=scoring_topic_words,
+            metric_names=(
+                _metric_names_for_coherences(coherences)
+                if fixed_k_reporting
+                else metric_names
+            ),
             coherences=coherences,
             counts=shared_counts,
             coherence_topn=local_args.coherence_topn,
@@ -2693,6 +2964,13 @@ def _score_pending_word_based_group(
                 None,
             ),
         )
+        if fixed_k_reporting:
+            metrics = _apply_fixed_k_reporting(
+                metrics=metrics,
+                topic_words=pending_iteration.topic_words,
+                coherences=coherences,
+                args=local_args,
+            )
         metrics["num_topics"] = float(local_args.num_topics)
         per_iter_metrics.append(metrics)
         per_iter_topic_words.append(
@@ -2791,6 +3069,11 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
             "condition_failure_policy must be fail-fast, exclude-condition, "
             "isolate, or continue-and-fail"
         )
+    if getattr(args, "mvtm_empty_topic_policy", "exclude") not in {
+        "exclude",
+        "fixed-k",
+    }:
+        raise ValueError("mvtm_empty_topic_policy must be exclude or fixed-k")
     CollapsedFoldInConfig(
         num_chains=int(getattr(args, "posterior_num_chains", 1)),
         burn_in_sweeps=int(getattr(args, "posterior_burn_in_sweeps", 20)),
@@ -2850,7 +3133,11 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
     coherence_window_size = coherence_window_sizes[primary_coherence]
     coherence_implementation = coherence_implementations[primary_coherence]
     coherence_min_window_count = coherence_min_window_counts[primary_coherence]
-    metric_names = _metric_names_for_coherences(coherences)
+    metric_names = (
+        _fixed_k_metric_names(coherences)
+        if _uses_fixed_k_reporting(args)
+        else _metric_names_for_coherences(coherences)
+    )
     summary_rows: list[dict[str, str | float]] = []
     summary_provenance: list[dict[str, object]] = []
     condition_failures: list[dict[str, object]] = []
@@ -3338,6 +3625,10 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                                 model, args
                             ),
                             prior_scale=_effective_prior_scale_for_model(model, args),
+                            covariance_type=_effective_covariance_type_for_model(
+                                model, args
+                            ),
+                            vmf_variant=_effective_vmf_variant_for_model(model, args),
                         )
                     )
                     logger.info(
@@ -3387,6 +3678,7 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                         exclude_labels=None,
                         split_csvs=split_csvs,
                         target_column=resolved_target_column,
+                        **_reference_band_kwargs(args),
                     )
                     logger.info(
                         "wb %s corpus done data_run=%s model=%s category=%s "
@@ -3472,7 +3764,10 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                     # path does, otherwise the same model publishes normal
                     # metrics over an empty topic whenever the reference corpus
                     # or the coherence set avoids the streaming path.
-                    if runtime.empty_topic_ids:
+                    if runtime.empty_topic_ids and not _uses_mvtm_fixed_k_policy(
+                        args,
+                        model=model,
+                    ):
                         empty_topic_task = PendingWordBasedGroupTask(
                             sort_index=0,
                             data_run=data_run,
@@ -3529,6 +3824,13 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                             "word_based iteration excluded: %s", empty_topic_failure
                         )
                         continue
+                    if runtime.empty_topic_ids:
+                        logger.warning(
+                            "wb %s MvTM fixed-K evaluation includes empty topics "
+                            "ids=%s",
+                            condition_progress,
+                            list(runtime.empty_topic_ids),
+                        )
                     runtime_iterations.append((int(iteration), runtime))
                     logger.info(
                         "wb %s topic_words done data_run=%s model=%s category=%s "
@@ -3555,6 +3857,17 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                         ",".join(coherences),
                     )
                     coherence_reference_streaming = False
+                    fixed_k_reporting = _uses_fixed_k_reporting(args)
+                    scoring_topic_words = (
+                        [topic for topic in topic_words if topic]
+                        if fixed_k_reporting
+                        else topic_words
+                    )
+                    scoring_metric_names = (
+                        _metric_names_for_coherences(coherences)
+                        if fixed_k_reporting
+                        else metric_names
+                    )
                     if args.coherence_reference == "wikipedia":
                         assert args.coherence_reference_path is not None
                         if _uses_streaming_reference(args):
@@ -3562,11 +3875,11 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                             metrics = {}
                             coherence_topic_words = (
                                 truncate_topic_words(
-                                    topic_words,
+                                    scoring_topic_words,
                                     args.coherence_topn,
                                 )
                                 if args.coherence_topn is not None
-                                else topic_words
+                                else scoring_topic_words
                             )
                             try:
                                 streaming_result = (
@@ -3626,11 +3939,11 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                             if "diversity" in metric_names:
                                 diversity_topic_words = (
                                     truncate_topic_words(
-                                        topic_words,
+                                        scoring_topic_words,
                                         args.diversity_topn,
                                     )
                                     if args.diversity_topn is not None
-                                    else topic_words
+                                    else scoring_topic_words
                                 )
                                 metrics["diversity"] = compute_topic_diversity(
                                     diversity_topic_words
@@ -3660,8 +3973,8 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                             )
                             try:
                                 metrics = evaluate_topic_words(
-                                    topic_words=topic_words,
-                                    metric_names=metric_names,
+                                    topic_words=scoring_topic_words,
+                                    metric_names=scoring_metric_names,
                                     texts=coherence_texts,
                                     dictionary=coherence_dictionary,
                                     corpus_bow=coherence_corpus_bow,
@@ -3704,8 +4017,8 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                         coherence_corpus_bow = topic_word_corpus_bow
                         try:
                             metrics = evaluate_topic_words(
-                                topic_words=topic_words,
-                                metric_names=metric_names,
+                                topic_words=scoring_topic_words,
+                                metric_names=scoring_metric_names,
                                 texts=coherence_texts,
                                 dictionary=coherence_dictionary,
                                 corpus_bow=coherence_corpus_bow,
@@ -3742,6 +4055,13 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                             continue
                         coherence_reference_num_docs = len(coherence_texts)
                         coherence_reference_vocab_size = len(coherence_dictionary)
+                    if fixed_k_reporting:
+                        metrics = _apply_fixed_k_reporting(
+                            metrics=metrics,
+                            topic_words=topic_words,
+                            coherences=coherences,
+                            args=args,
+                        )
                     metrics["num_topics"] = float(args.num_topics)
                     per_iter_metrics.append(metrics)
                     per_iter_topic_words.append(
@@ -3804,6 +4124,8 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                         model, args
                     ),
                     prior_scale=_effective_prior_scale_for_model(model, args),
+                    covariance_type=_effective_covariance_type_for_model(model, args),
+                    vmf_variant=_effective_vmf_variant_for_model(model, args),
                 )
                 condition_id, condition_fingerprint = _build_output_condition_id(
                     model=model,
@@ -3853,6 +4175,7 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                         model, args
                     ),
                     prior_scale=_effective_prior_scale_for_model(model, args),
+                    covariance_type=_effective_covariance_type_for_model(model, args),
                     source_condition_id=(
                         None
                         if provenance.get("condition_id") is None
@@ -3872,6 +4195,9 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                     dict_exclude_tokens=_dict_exclude_tokens(args),
                     posterior_settings=_posterior_settings(args),
                     topic_word_score_mode=_topic_word_score_mode(args),
+                    dict_no_above=float(args.dict_no_above),
+                    reference_min_df=_reference_min_df(args),
+                    reference_max_df_ratio=_reference_max_df_ratio(args),
                 )
                 display_key = condition_id
                 started_at = datetime.now(UTC).isoformat()
@@ -3958,6 +4284,7 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                     embedding_variant=requested_embedding_variant,
                     effective_embedding_variant=effective_embedding_variant,
                     prior_scale=_effective_prior_scale_for_model(model, args),
+                    covariance_type=_effective_covariance_type_for_model(model, args),
                     iterations=used_iterations,
                     started_at=started_at,
                     execution_id=execution_id,
@@ -4023,6 +4350,10 @@ def run_topic_coherence_analysis_from_args(args: argparse.Namespace) -> Path:
                     TOPIC_WORD_RANKING_SCHEMA_VERSION
                 )
                 metrics_meta["posterior_settings"] = _posterior_settings(args)
+                metrics_meta["empty_topic_evaluation"] = _empty_topic_policy_meta(
+                    args=args,
+                    model=model,
+                )
                 metrics_meta["requested_iterations"] = [
                     int(value) for value in args.iteration
                 ]
@@ -4300,6 +4631,8 @@ def run_topic_coherence_analysis(
     categories: list[str],
     embedding_variant: str | None = DEFAULT_EMBEDDING_VARIANT,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     out_root: Path = DEFAULT_OUT_ROOT,
     coherence: str | list[str] | tuple[str, ...] = "c_v",
     coherence_topn: int = 10,
@@ -4316,6 +4649,8 @@ def run_topic_coherence_analysis(
     dict_exclude_single_alpha: bool = False,
     dict_exclude_with_digit: bool = False,
     dict_exclude_hiragana_only: bool = False,
+    reference_min_df: int = 0,
+    reference_max_df_ratio: float = 1.0,
     posterior_num_chains: int = 1,
     posterior_burn_in_sweeps: int = 20,
     posterior_retained_samples: int = 20,
@@ -4346,6 +4681,7 @@ def run_topic_coherence_analysis(
     reference_index_root: Path | None = None,
     reference_count_max_pending: int | None = None,
     condition_failure_policy: str = "exclude-condition",
+    mvtm_empty_topic_policy: str = "exclude",
     language: str = "english",
     delimiter: str = " / ",
     ja_replace_num: bool = True,
@@ -4365,6 +4701,8 @@ def run_topic_coherence_analysis(
         category=categories,
         embedding_variant=embedding_variant,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         out_root=out_root,
         coherence=coherence,
         coherence_topn=int(coherence_topn),
@@ -4387,6 +4725,8 @@ def run_topic_coherence_analysis(
         dict_exclude_single_alpha=bool(dict_exclude_single_alpha),
         dict_exclude_with_digit=bool(dict_exclude_with_digit),
         dict_exclude_hiragana_only=bool(dict_exclude_hiragana_only),
+        reference_min_df=int(reference_min_df),
+        reference_max_df_ratio=float(reference_max_df_ratio),
         posterior_num_chains=int(posterior_num_chains),
         posterior_burn_in_sweeps=int(posterior_burn_in_sweeps),
         posterior_retained_samples=int(posterior_retained_samples),
@@ -4427,6 +4767,7 @@ def run_topic_coherence_analysis(
         reference_index_root=reference_index_root,
         reference_count_max_pending=reference_count_max_pending,
         condition_failure_policy=str(condition_failure_policy),
+        mvtm_empty_topic_policy=str(mvtm_empty_topic_policy),
         language=language,
         delimiter=delimiter,
         ja_replace_num=bool(ja_replace_num),

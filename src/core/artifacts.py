@@ -64,6 +64,11 @@ class VmfArtifactMetadata:
     num_components: int = 1
     max_kappa: float | None = None
     encoder_config: dict[str, Any] | None = None
+    # Hyperparameter label of src.core.vmf_variant (None for the default run) and the
+    # training hyperparameters the run used (kappa0, alpha0, gibbs_sweeps, num_samples,
+    # num_iterations); both are absent from metadata written before the sensitivity sweep.
+    parameter_variant: str | None = None
+    hyperparameters: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

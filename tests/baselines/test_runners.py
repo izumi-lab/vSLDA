@@ -21,6 +21,7 @@ from src.baselines.adapters import (
     run_etm,
     run_gaussianlda,
     run_mvtm,
+    run_sam,
     run_senclu,
     run_sentence_gaussianlda,
     run_sentlda,
@@ -125,6 +126,37 @@ _RUNNER_FIXTURES: list[_RunnerFixture] = [
             "started_at": "2026-04-10T02:15:30+00:00",
             "execution_id": "baseline_20260410T021530Z",
         },
+    ),
+    _RunnerFixture(
+        name="sam",
+        runner_fn=run_sam,
+        parse_module_path="src.baselines.adapters.parse_sam_params",
+        train_module_path="src.baselines.adapters.train_sam",
+        infer_module_path="src.baselines.adapters.infer_sam",
+        persist_module_path="src.baselines.adapters.persist_sam_run",
+        train_artifact_name="sam.pkl",
+        infer_artifact_name="all.pkl",
+        extra_artifacts={
+            "params_json": "params.json",
+            "vocabulary": "vocabulary.json",
+            "topic_word_scores": "topic_word_scores.pkl",
+            "idf": "idf.pkl",
+            "topic_term_weights": "topic_term_weights.json",
+            "test_doc_topic_soft": "all_doc_topic_soft.pkl",
+        },
+        # SAM uses neither a sentence encoder nor word vectors, so its display
+        # key stays the plain ``k<K>_it<i>`` that bleilda and sentlda get.
+        expected_pointer_path_parts=(
+            "dummy",
+            "default",
+            "sam",
+            "latest",
+            "all",
+            "k5_it1",
+        ),
+        train_kwargs_to_assert={"num_topics": 5, "effective_random_state": 7},
+        infer_kwargs_to_assert={"num_topics": 5},
+        request_options_extra={"effective_random_state": 7},
     ),
     _RunnerFixture(
         name="bleilda",
@@ -286,7 +318,28 @@ def test_runner_registry_contains_expected_models() -> None:
         "senclu",
         "sentlda",
         "sentence_gaussianlda",
+        "sam",
+        "sam_tf",
     }.issubset(RUNNERS.keys())
+
+
+def test_sam_tf_is_a_separate_runner_sharing_the_sam_family() -> None:
+    """tf and tf-idf are two conditions in the paper, so two runner keys.
+
+    One runner with a ``feature_scheme`` parameter would write both to the same
+    display key and collide; a second key gives ``sam_tf`` its own result tree
+    while the training, inference and persistence code stays shared.
+    """
+
+    spec = RUNNERS["sam_tf"]
+    assert spec.key == "sam_tf"
+    # tf is the reported condition, so it carries the plain "SAM" label while the
+    # tf-idf tree is reported as the variant.  The runner keys stay as they are:
+    # renaming them would invalidate every condition fingerprint already computed.
+    assert spec.display_name == "SAM"
+    assert RUNNERS["sam"].display_name == "SAM (tf-idf)"
+    assert spec.family == RUNNERS["sam"].family == "sam"
+    assert spec.runner is not RUNNERS["sam"].runner
 
 
 def test_runner_registry_marks_clustering_methods_explicitly() -> None:

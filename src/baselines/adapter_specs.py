@@ -12,3 +12,7 @@ class BaselineAdapterSpec:
     train_passes_test_csvs: bool = False
     train_passes_encoder_device: bool = False
     train_passes_effective_random_state: bool = False
+    # The persist step receives ``foldin`` (request option ``vmf_foldin``, default
+    # True) and ``condition_fingerprint`` so that it can write the collapsed
+    # fold-in document-topic artifacts of the vMF family (MvTM).
+    persist_passes_foldin: bool = False

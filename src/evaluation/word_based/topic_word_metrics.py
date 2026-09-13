@@ -857,6 +857,72 @@ def compute_topic_diversity(topic_words: TopicWords) -> float:
     return float(len(unique_words) / total_words)
 
 
+def apply_fixed_k_empty_topic_policy(
+    *,
+    active_metrics: dict[str, float],
+    topic_words: TopicWords,
+    coherences: list[str] | tuple[str, ...],
+    diversity_topn: int,
+) -> dict[str, float]:
+    """Keep empty topics in the requested-K denominator.
+
+    ``active_metrics`` must be computed after removing empty topic-word rows.
+    Bounded coherence metrics receive an explicit empty-topic value: zero for
+    C_V and minus one for NPMI variants.  Unbounded metrics (C_UCI, UMass, and
+    any future unrecognised metric) remain active-only and are accompanied by
+    utilization diagnostics instead of an arbitrary penalty.
+
+    The ordinary metric keys contain the comparison value so existing summary
+    tooling can compare them with complete runs.  ``*_active_only`` keys retain
+    the conditional score for diagnosis.
+    """
+
+    requested_topics = len(topic_words)
+    if requested_topics <= 0:
+        raise ValueError("fixed-K evaluation requires at least one requested topic")
+    if diversity_topn <= 0:
+        raise ValueError("diversity_topn must be positive")
+
+    normalized_coherences = normalize_coherences(coherences)
+    multiple_coherences = len(normalized_coherences) > 1
+    active_topic_words = [topic for topic in topic_words if topic]
+    active_topics = len(active_topic_words)
+    empty_topics = requested_topics - active_topics
+    utilization = active_topics / requested_topics
+
+    result: dict[str, float] = {}
+    for coherence in normalized_coherences:
+        metric_key = coherence_metric_key(
+            coherence,
+            multiple=multiple_coherences,
+        )
+        active_score = float(active_metrics.get(metric_key, float("nan")))
+        result[f"{metric_key}_active_only"] = active_score
+        if coherence == "c_v":
+            result[metric_key] = (
+                0.0 if active_topics == 0 else active_score * utilization
+            )
+        elif coherence in {"c_npmi", "doc_npmi"}:
+            result[metric_key] = (
+                -1.0
+                if active_topics == 0
+                else active_score * utilization - (1.0 - utilization)
+            )
+        else:
+            result[metric_key] = active_score
+
+    active_diversity = float(active_metrics.get("diversity", float("nan")))
+    result["diversity_active_only"] = active_diversity
+    diversity_words = truncate_topic_words(active_topic_words, diversity_topn)
+    unique_words = {word for topic in diversity_words for word, _score in topic}
+    result["diversity"] = float(len(unique_words) / (requested_topics * diversity_topn))
+    result["topic_utilization"] = float(utilization)
+    result["num_active_topics"] = float(active_topics)
+    result["num_empty_topics"] = float(empty_topics)
+    result["complete_run_rate"] = float(empty_topics == 0)
+    return result
+
+
 def evaluate_topic_words(
     *,
     topic_words: TopicWords,

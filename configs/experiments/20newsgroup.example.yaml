@@ -28,6 +28,9 @@ train:
   num_components: 1
   gibbs_sweeps: 20
   num_samples: 8
+  saem_burn_in: 5
+  saem_decay: 1.0
+  kappa_solver: newton
 
 encoder:
   model_name: sentence-transformers/all-minilm-l6-v2
@@ -53,6 +56,8 @@ baselines:
     runner: ctm
   - name: Blei LDA
     runner: bleilda
+  - name: SAM
+    runner: sam
   - name: Gaussian LDA
     runner: gaussianlda
     params:

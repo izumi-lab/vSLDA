@@ -1313,3 +1313,143 @@ def test_resolve_gaussian_condition_dir_finds_parameter_variant_without_being_to
     )
 
     assert resolved == archive_dir
+
+
+def test_vmf_hyperparameter_variant_runs_never_stand_in_for_the_default_run(
+    tmp_path: Path,
+) -> None:
+    """A sweep run (``<key>_kappa0-100``) is a sibling of the default run; resolving the
+    default must ignore it, and resolving the variant must find exactly it."""
+    dataset_root = tmp_path / "dummy"
+    for variant in [None, "kappa0-100", "zeta-40"]:
+        tag = variant or "default"
+        archive_dir = build_vmf_archive_dir(
+            category="science",
+            iteration=0,
+            num_topics=20,
+            num_components=1,
+            embedding_variant="minilm",
+            parameter_variant=variant,
+            started_at="2026-09-02T00:00:00+00:00",
+            execution_id=f"vmf_{tag}",
+            run_name="default",
+            dataset_root=dataset_root,
+        )
+        archive_dir.mkdir(parents=True)
+        save_json(
+            {
+                "condition_id": f"it0__k20__{tag}",
+                "num_components": 1,
+                "parameter_variant": variant,
+                "axes": {
+                    "iteration": 0,
+                    "num_topics": 20,
+                    "category": "science",
+                    "data_run": "default",
+                    "embedding_variant": "minilm",
+                },
+            },
+            archive_dir / METADATA_FILENAME,
+        )
+        write_vmf_latest_pointer(
+            dataset="dummy",
+            data_run="default",
+            category="science",
+            iteration=0,
+            num_topics=20,
+            num_components=1,
+            embedding_variant="minilm",
+            parameter_variant=variant,
+            archive_dir=archive_dir,
+            started_at="2026-09-02T00:00:00+00:00",
+            execution_id=f"vmf_{tag}",
+            condition_fingerprint=f"fp_{tag}",
+            artifacts={"metadata": "metadata.json"},
+            dataset_root=dataset_root,
+        )
+
+    assert (
+        build_vmf_display_key(
+            iteration=0,
+            num_topics=20,
+            num_components=1,
+            embedding_variant="minilm",
+            parameter_variant="kappa0-100",
+        )
+        == "k20_it0_c1_minilm_kappa0-100"
+    )
+    assert (
+        dataset_root
+        / "default"
+        / "vmf_sentence_lda"
+        / "latest"
+        / "science"
+        / "k20_it0_c1_minilm_kappa0-100"
+        / "CURRENT.json"
+    ).exists()
+
+    default_dir = resolve_vmf_experiment_dir(
+        dataset="dummy",
+        iteration=0,
+        num_topics=20,
+        category="science",
+        num_components=1,
+        embedding_variant="minilm",
+        dataset_root=dataset_root,
+    )
+    assert default_dir.name == "vmf_default"
+    variant_dir = resolve_vmf_experiment_dir(
+        dataset="dummy",
+        iteration=0,
+        num_topics=20,
+        category="science",
+        num_components=1,
+        embedding_variant="minilm",
+        parameter_variant="zeta-40",
+        dataset_root=dataset_root,
+    )
+    assert variant_dir.name == "vmf_zeta-40"
+    path = build_vmf_doc_topic_path(
+        dataset="dummy",
+        iteration=0,
+        num_topics=20,
+        category="science",
+        split="test",
+        num_components=1,
+        embedding_variant="minilm",
+        parameter_variant="kappa0-100",
+        dataset_root=dataset_root,
+    )
+    assert path.parent.name == "vmf_kappa0-100"
+    with pytest.raises(MissingArtifactError):
+        resolve_vmf_experiment_dir(
+            dataset="dummy",
+            iteration=0,
+            num_topics=20,
+            category="science",
+            num_components=1,
+            embedding_variant="minilm",
+            parameter_variant="t-5",
+            dataset_root=dataset_root,
+        )
+
+
+def test_build_vmf_doc_topic_path_uses_the_foldin_suffix_and_rejects_unknown() -> None:
+    path = build_vmf_doc_topic_path(
+        dataset="missing_dataset_for_assignment_suffix_test",
+        iteration=0,
+        num_topics=20,
+        category="science",
+        split="train",
+        assignment="foldin",
+    )
+    assert path.name == "doc_topic_train_foldin.pkl"
+    with pytest.raises(ValueError):
+        build_vmf_doc_topic_path(
+            dataset="missing_dataset_for_assignment_suffix_test",
+            iteration=0,
+            num_topics=20,
+            category="science",
+            split="train",
+            assignment="bogus",
+        )

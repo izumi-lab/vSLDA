@@ -31,6 +31,45 @@ from src.utils.evaluation import calculate_avg_ll_vmf_from_encoded
 from src.utils.logging import get_logger
 
 
+def mean_resultant_length(kappa, dim: int) -> np.ndarray:
+    """A_M(kappa) = I_{M/2}(kappa) / I_{M/2-1}(kappa) via exponentially scaled Bessel functions."""
+    order = float(dim) / 2.0 - 1.0
+    kappa_arr = np.asarray(kappa, dtype=np.float64)
+    return _ive(order + 1.0, kappa_arr) / _ive(order, kappa_arr)
+
+
+def solve_kappa_newton(
+    rbar: float,
+    dim: int,
+    kappa0: float,
+    *,
+    tol: float = 1e-12,
+    max_iter: int = 100,
+) -> float:
+    """Exact maximum-likelihood concentration: the root of A_M(kappa) = rbar.
+
+    Newton's method from ``kappa0`` (normally the Banerjee et al. 2005 approximation) with
+    A_M'(kappa) = 1 - A_M(kappa)^2 - (M - 1) A_M(kappa) / kappa (Sra 2012). Two or three
+    iterations reach machine precision at the embedding dimensions used here.
+    """
+    kappa = float(kappa0)
+    if not np.isfinite(kappa) or kappa <= 0.0:
+        return kappa
+    a = float(mean_resultant_length(kappa, dim))
+    residual = a - float(rbar)
+    for _ in range(max_iter):
+        if abs(residual) <= tol:
+            break
+        derivative = 1.0 - a * a - (float(dim) - 1.0) * a / kappa
+        candidate = kappa - residual / derivative
+        if not np.isfinite(candidate) or candidate <= 0.0:
+            candidate = 0.5 * kappa
+        kappa = float(candidate)
+        a = float(mean_resultant_length(kappa, dim))
+        residual = a - float(rbar)
+    return kappa
+
+
 @dataclass(frozen=True)
 class VMFIterationDiagnostics:
     iteration: int
@@ -62,6 +101,11 @@ class VMFIterationDiagnostics:
     alpha_update_sec: float
     avg_log_likelihood_sec: float
     iteration_elapsed_sec: float
+    # SAEM variant (defaults describe the plain MCEM)
+    saem_gamma: float = 1.0
+    saem_objective: float = float("nan")
+    alpha_frozen: bool = False
+    kappa_solver: str = "banerjee"
 
 
 @dataclass(frozen=True)
@@ -89,6 +133,9 @@ class VMFIterationResult:
     repair_enabled: bool
     repair_report: dict[str, object] | None
     alpha_min_value: float
+    saem_gamma: float = 1.0
+    saem_objective: float = float("nan")
+    alpha_frozen: bool = False
 
 
 @dataclass(frozen=True)
@@ -155,6 +202,9 @@ class VMFLDATrainer:
         pre_normalize_transform: str = "none",
         whitening_eps: float = 1e-5,
         algorithm_variant: str | None = None,
+        saem_burn_in: int | None = 5,
+        saem_decay: float = 1.0,
+        kappa_solver: str = "newton",
         log=None,
         save_path: Optional[os.PathLike | str] = None,
         progress: ProgressReporter | None = None,
@@ -186,6 +236,18 @@ class VMFLDATrainer:
                 One of: {"none", "mean_center", "whitening"}.
             whitening_eps:
                 Positive stabilizer used only when pre_normalize_transform="whitening".
+            saem_burn_in:
+                Stochastic-approximation EM (Kuhn & Lavielle 2004): after this many outer
+                iterations T_0 the E-step statistics (n_k, r_k) are averaged with step size
+                gamma_t = (t - T_0)^(-saem_decay) and alpha is frozen (the default, T_0 = 5).
+                None keeps the plain MCEM (each M-step uses the statistics of its own
+                E-step, gamma == 1).
+            saem_decay:
+                Exponent a in (1/2, 1] of the step size (a > 1/2 gives sum gamma^2 < inf).
+            kappa_solver:
+                "newton" (default): the exact root of A_M(kappa) = rbar, started from the
+                closed-form approximation of Banerjee et al. (2005); "banerjee": that
+                approximation itself.
             log:
                 Logger instance (if None, get_logger("vMF-LDA") is used).
             save_path:
@@ -212,6 +274,18 @@ class VMFLDATrainer:
             raise ValueError("kappa must be finite and > 0")
         if self.kappa_default > self.max_kappa:
             raise ValueError("kappa must be <= max_kappa")
+        self.saem_burn_in = None if saem_burn_in is None else int(saem_burn_in)
+        if self.saem_burn_in is not None and self.saem_burn_in < 0:
+            raise ValueError("saem_burn_in must be >= 0 or None")
+        self.saem_decay = float(saem_decay)
+        if not (0.5 < self.saem_decay <= 1.0):
+            raise ValueError("saem_decay must lie in (1/2, 1]")
+        self.kappa_solver = str(kappa_solver)
+        if self.kappa_solver not in {"banerjee", "newton"}:
+            raise ValueError("kappa_solver must be 'banerjee' or 'newton'")
+        self._sa_state: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self.saem_gamma: list[float] = []
+        self.saem_objective: list[float] = []
         self._last_estimated_kappa_max: float | None = None
         self._last_clipped_topic_ids: list[int] = []
         self.document_encoder = VMFDocumentEncoder(
@@ -1032,6 +1106,8 @@ class VMFLDATrainer:
                 numerator = r_k * d_dim - r_k**3
                 denominator = 1.0 - r_k**2
                 kappa_est = numerator / (denominator + eps)
+                if self.kappa_solver == "newton":
+                    kappa_est = solve_kappa_newton(r_k, d_dim, kappa_est)
                 self.kappa_per_topic[k] = self._sanitize_kappa_estimate(
                     kappa_est,
                     topic_id=k,
@@ -1055,6 +1131,48 @@ class VMFLDATrainer:
             copy=False,
         )
         self._refresh_density_caches()
+
+    # ------------------------------------------------------------------------
+    # SAEM: stochastic-approximation averaging of the E-step statistics
+    # ------------------------------------------------------------------------
+    def saem_step_size(self, t: int) -> float:
+        """gamma_t of outer iteration t (1-based): 1 during burn-in, (t - T_0)^(-a) after."""
+        if self.saem_burn_in is None or t <= self.saem_burn_in:
+            return 1.0
+        return float(t - self.saem_burn_in) ** (-self.saem_decay)
+
+    def _saem_update(
+        self,
+        gamma: float,
+        nk: np.ndarray,
+        nk_comp: np.ndarray,
+        r: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """s_t = s_{t-1} + gamma_t (S_t - s_{t-1}); with gamma == 1 this is S_t itself."""
+        if self._sa_state is None or gamma >= 1.0:
+            state = (nk, nk_comp, r)
+        else:
+            s_nk, s_nk_comp, s_r = self._sa_state
+            state = (
+                s_nk + gamma * (nk - s_nk),
+                s_nk_comp + gamma * (nk_comp - s_nk_comp),
+                s_r + gamma * (r - s_r),
+            )
+        self._sa_state = state
+        return state
+
+    def _saem_objective(self, nk: np.ndarray, r: np.ndarray) -> float:
+        """Q(Delta; s) = sum_k { n_k log C_M(kappa_k) + kappa_k mu_k . r_k } at the M-step input."""
+        log_c = self._log_vmf_normalization_const(self.kappa_per_topic)
+        r_sum = np.asarray(r, dtype=np.float64).sum(axis=1)
+        dots = np.einsum(
+            "km,km->k", np.asarray(self.topic_means, dtype=np.float64), r_sum
+        )
+        return float(
+            np.sum(
+                np.asarray(nk, dtype=np.float64) * log_c + self.kappa_per_topic * dots
+            )
+        )
 
     def _update_alpha_if_needed(
         self,
@@ -1184,6 +1302,10 @@ class VMFLDATrainer:
             alpha_update_sec=float(result.alpha_update_sec),
             avg_log_likelihood_sec=float(result.avg_log_likelihood_sec),
             iteration_elapsed_sec=float(result.iteration_elapsed_sec),
+            saem_gamma=float(result.saem_gamma),
+            saem_objective=float(result.saem_objective),
+            alpha_frozen=bool(result.alpha_frozen),
+            kappa_solver=str(self.kappa_solver),
         )
         self.iteration_diagnostics.append(diagnostics)
 
@@ -1244,14 +1366,23 @@ class VMFLDATrainer:
                 )
         repair_sec = time.perf_counter() - repair_start
 
+        # SAEM step: after burn-in the M-step sees the averaged statistics
+        t = iteration + 1
+        gamma = self.saem_step_size(t)
+        nk, nk_comp, r = self._saem_update(gamma, nk, nk_comp, r)
+
         m_step_start = time.perf_counter()
         self._apply_m_step_updates(nk=nk, nk_comp=nk_comp, r=r)
         m_step_sec = time.perf_counter() - m_step_start
+        saem_objective = self._saem_objective(nk, r)
+        self.saem_gamma.append(float(gamma))
+        self.saem_objective.append(float(saem_objective))
 
         alpha_update_start = time.perf_counter()
+        alpha_frozen = self.saem_burn_in is not None and t > self.saem_burn_in
         alpha_updated, alpha_converged = self._update_alpha_if_needed(
             iteration=iteration,
-            estimate_alpha=estimate_alpha,
+            estimate_alpha=bool(estimate_alpha) and not alpha_frozen,
             alpha_update_every=alpha_update_every,
             alpha_max_iter=alpha_max_iter,
             alpha_tol=alpha_tol,
@@ -1284,6 +1415,9 @@ class VMFLDATrainer:
             repair_enabled=bool(repair_empty_topics),
             repair_report=repair_report,
             alpha_min_value=float(alpha_min_value),
+            saem_gamma=float(gamma),
+            saem_objective=float(saem_objective),
+            alpha_frozen=bool(alpha_frozen),
         )
 
     def build_invariant_report(self) -> VMFInvariantReport:

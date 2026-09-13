@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import pytest
 
 from src.core.artifacts import load_json, save_json
-from src.evaluation.classification.summary import build_summary_report, write_summary
+from src.core.vmf_assignment import DEFAULT_VMF_ASSIGNMENT
+from src.evaluation.classification.summary import (
+    _build_provenance,
+    build_summary_report,
+    write_summary,
+)
 from src.evaluation.classification.summary_coverage import write_summary_coverage_index
 from src.evaluation.classification.workflow import (
     build_classification_condition_id,
@@ -243,7 +249,7 @@ def test_write_summary_writes_missing_coverage_for_zero_run_condition(
             "data_run": "default",
             "topics": 20,
             "classifiers": "",
-            "vmf_assignment": "hard",
+            "vmf_assignment": DEFAULT_VMF_ASSIGNMENT,
             "embedding_variants": "",
             "selector": "sentence_gaussianlda",
             "model": "",
@@ -1079,3 +1085,194 @@ def test_write_summary_coverage_index_collects_incomplete_rows(
     with output_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["summary_path"].endswith("acc_20news.tex")
+
+
+def test_write_summary_writes_the_raw_per_run_scores(tmp_path: Path) -> None:
+    iter_dir = tmp_path / "iter0"
+    for iteration, (a, b) in enumerate(((50.0, 60.0), (52.0, 58.0))):
+        write_evaluation_json(
+            meta={
+                "task": "classification",
+                "dataset": "20newsgroup",
+                "iteration": iteration,
+            },
+            results={"science": {"ModelA": a, "ModelB": b}},
+            path=tmp_path / f"iter{iteration}" / "acc_20newsgroup_20topic.json",
+        )
+    assert iter_dir.exists()
+
+    output_path = tmp_path / "out" / "acc_20newsgroup_20topic.tex"
+    write_summary(
+        "acc",
+        "20newsgroup",
+        20,
+        [0, 1],
+        result_root=tmp_path,
+        output_path=output_path,
+    )
+
+    scores = load_json(output_path.with_suffix(".scores.json"))
+    assert scores["metric"] == "acc"
+    assert scores["topics"] == 20
+    assert scores["iterations"] == [0, 1]
+    # Categories follow the dataset definition; those without runs stay empty.
+    assert "science" in scores["categories"]
+    assert scores["scores"]["science"]["ModelA"] == [50.0, 52.0]
+    assert scores["scores"]["science"]["ModelB"] == [60.0, 58.0]
+    # The sidecar carries raw values only; the rendered mean lives in the .tex.
+    assert "ensuremath" not in json.dumps(scores)
+
+
+def test_scores_sidecar_records_the_vmf_assignment(tmp_path: Path) -> None:
+    for iteration in (0, 1):
+        write_evaluation_json(
+            meta={
+                "task": "classification",
+                "dataset": "20newsgroup",
+                "iteration": iteration,
+                "vmf_assignment": "foldin",
+                "categories": {
+                    "science": {
+                        "feature_catalog": [
+                            {
+                                "feature_name": "vMF Sentence LDA (fold-in) [c1_minilm]",
+                                "embedding_variant": "minilm",
+                                "source_condition_id": "it0__k20__abc",
+                            },
+                            {
+                                "feature_name": "Blei LDA",
+                                "source_condition_id": "it0__k20__def",
+                            },
+                        ]
+                    }
+                },
+            },
+            results={
+                "science": {
+                    "vMF Sentence LDA (fold-in) [c1_minilm] [LogReg]": 70.0,
+                    "Blei LDA [LogReg]": 60.0,
+                }
+            },
+            path=tmp_path / f"iter{iteration}" / "acc_20newsgroup_20topic.json",
+        )
+
+    output_path = tmp_path / "out" / "acc_20newsgroup_20topic.tex"
+    write_summary(
+        "acc",
+        "20newsgroup",
+        20,
+        [0, 1],
+        vmf_assignment="foldin",
+        result_root=tmp_path,
+        output_path=output_path,
+    )
+
+    scores = load_json(output_path.with_suffix(".scores.json"))
+    assert scores["vmf_assignment"] == "foldin"
+    provenance = scores["provenance"]["science"]
+    assert (
+        provenance["vMF Sentence LDA (fold-in) [c1_minilm] [LogReg]"]["vmf_assignment"]
+        == "foldin"
+    )
+    assert provenance["Blei LDA [LogReg]"]["vmf_assignment"] is None
+
+
+def test_build_provenance_matches_catalog_entries_by_name_prefix() -> None:
+    catalog = {
+        "science": [
+            {
+                "feature_name": "ETM [googlenews300]",
+                "embedding_variant": "googlenews300",
+                "encoder_config": {"word2vec": "word2vec-google-news-300"},
+                "source_condition_id": "it0__k20__etm",
+            },
+            {
+                "feature_name": "Gaussian LDA",
+                "baseline_params": {"word2vec": "word2vec-google-news-300"},
+                "prior_scale": 0.1,
+                "source_condition_id": "it0__k20__glda",
+            },
+        ]
+    }
+    provenance = _build_provenance(
+        catalog,
+        categories=["science"],
+        models=["ETM [googlenews300] [LogReg]", "Gaussian LDA [LogReg]", "Absent"],
+    )
+    science = provenance["science"]
+    assert science["ETM [googlenews300] [LogReg]"]["word2vec"] == (
+        "word2vec-google-news-300"
+    )
+    assert science["ETM [googlenews300] [LogReg]"]["embedding_variant"] == (
+        "googlenews300"
+    )
+    # word2vec is read from baseline_params when there is no encoder_config.
+    assert science["Gaussian LDA [LogReg]"]["word2vec"] == "word2vec-google-news-300"
+    assert science["Gaussian LDA [LogReg]"]["prior_scale"] == 0.1
+    assert "Absent" not in science
+
+
+def test_model_selector_ignores_the_vmf_estimator_suffix() -> None:
+    from src.evaluation.classification.summary import _model_matches_selector
+
+    for name in (
+        "vMF Sentence LDA [c1_minilm] [LogReg]",
+        "vMF Sentence LDA (soft) [c1_minilm] [LogReg]",
+        "vMF Sentence LDA (fold-in) [c1_minilm] [LogReg]",
+    ):
+        assert _model_matches_selector(name, "vmf_sentence_lda"), name
+    assert not _model_matches_selector(
+        "Sentence LDA [minilm_norm] [LogReg]", "vmf_sentence_lda"
+    )
+
+
+def test_model_selector_matches_every_vmf_estimator_suffix() -> None:
+    """``--model vmf_sentence_lda`` selects the soft, fold-in and fold-in counts features."""
+    from src.evaluation.classification.summary import _model_matches_selector
+
+    for name in (
+        "vMF Sentence LDA [c1_minilm] [LogReg]",
+        "vMF Sentence LDA (soft) [c1_minilm] [LogReg]",
+        "vMF Sentence LDA (fold-in) [c1_minilm] [LogReg]",
+        "vMF Sentence LDA (fold-in counts) [c1_minilm] [LogReg]",
+    ):
+        assert _model_matches_selector(name, "vmf_sentence_lda"), name
+    assert not _model_matches_selector("Blei LDA [LogReg]", "vmf_sentence_lda")
+
+
+def test_build_provenance_records_the_estimator_for_the_vmf_family() -> None:
+    """``vmf_assignment`` is recorded for the vMF Sentence LDA and MvTM cells only."""
+
+    catalog = {
+        "science": [
+            {
+                "feature_name": "vMF Sentence LDA [c1_minilm]",
+                "embedding_variant": "minilm",
+            },
+            {
+                "feature_name": "MvTM [googlenews300]",
+                "embedding_variant": "googlenews300",
+            },
+            {
+                "feature_name": "ETM [googlenews300]",
+                "embedding_variant": "googlenews300",
+            },
+        ]
+    }
+    provenance = _build_provenance(
+        catalog,
+        categories=["science"],
+        models=[
+            "vMF Sentence LDA [c1_minilm] [LogReg]",
+            "MvTM [googlenews300] [LogReg]",
+            "ETM [googlenews300] [LogReg]",
+        ],
+        vmf_assignment="foldincounts",
+    )["science"]
+    assert provenance["vMF Sentence LDA [c1_minilm] [LogReg]"]["vmf_assignment"] == (
+        "foldincounts"
+    )
+    assert (
+        provenance["MvTM [googlenews300] [LogReg]"]["vmf_assignment"] == "foldincounts"
+    )
+    assert provenance["ETM [googlenews300] [LogReg]"]["vmf_assignment"] is None

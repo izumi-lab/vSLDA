@@ -43,11 +43,20 @@ def run_comparison(
     vmf_soft_temp: float | None = None,
     encoder_model: str | None = None,
     strip_terminal_normalize: bool | None = None,
+    encoder_device: str | None = None,
     prior_scale: float | None = None,
     word2vec: str | None = None,
     categories: Sequence[str] | None = None,
     num_topics: Sequence[int] | None = None,
     iterations: Sequence[int] | None = None,
+    covariance_type: str | None = None,
+    kappa0: float | None = None,
+    alpha0: float | None = None,
+    gibbs_sweeps: int | None = None,
+    num_samples: int | None = None,
+    num_iterations: int | None = None,
+    saem_burn_in: int | None = None,
+    saem_decay: float | None = None,
 ) -> Path:
     if seed is not None and seed_base is not None:
         raise ValueError("Use either --seed or --seed_base, not both.")
@@ -56,8 +65,17 @@ def run_comparison(
         config_path,
         encoder_model=encoder_model,
         strip_terminal_normalize=strip_terminal_normalize,
+        encoder_device=encoder_device,
         prior_scale=prior_scale,
         word2vec=word2vec,
+        covariance_type=covariance_type,
+        kappa0=kappa0,
+        alpha0=alpha0,
+        gibbs_sweeps=gibbs_sweeps,
+        num_samples=num_samples,
+        num_iterations=num_iterations,
+        saem_burn_in=saem_burn_in,
+        saem_decay=saem_decay,
     )
     runtime_cfg = getattr(cfg, "runtime", None)
     vmf_cfg = getattr(cfg, "vmf", None)
@@ -111,6 +129,7 @@ def run_comparison(
             seed_base=resolved_seed_base,
             parallelism=parallelism,
             vmf_soft_temp=resolved_vmf_soft_temp,
+            vmf_foldin=bool(getattr(vmf_inference_cfg, "foldin", True)),
         )
 
         if parallelism.category_num_workers > 1:

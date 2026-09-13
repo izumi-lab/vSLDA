@@ -71,6 +71,7 @@ def write_vmf_latest_pointer(
     artifacts: Mapping[str, str],
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     encoder_config: Mapping[str, Any] | None = None,
     dataset_root: Path | None = None,
 ) -> Path:
@@ -80,6 +81,7 @@ def write_vmf_latest_pointer(
         num_topics=num_topics,
         num_components=num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         run_name=data_run,
         dataset_root=dataset_root,
     )
@@ -91,6 +93,7 @@ def write_vmf_latest_pointer(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         ),
         dataset=dataset,
         data_run=data_run,
@@ -101,6 +104,7 @@ def write_vmf_latest_pointer(
         condition_fingerprint=condition_fingerprint,
         artifacts=artifacts,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
         encoder_config=encoder_config,
     )
 

@@ -9,6 +9,7 @@ from gensim.corpora import Dictionary
 
 from src.evaluation.word_based.topic_word_metrics import (
     PMI_SMOOTHING_EPSILON,
+    apply_fixed_k_empty_topic_policy,
     compute_coherence_score,
     compute_coherence_scores,
     compute_doc_npmi_score,
@@ -30,6 +31,59 @@ def test_compute_topic_diversity_uses_unique_word_ratio() -> None:
     diversity = compute_topic_diversity(topic_words)
 
     assert diversity == 0.75
+
+
+def test_fixed_k_empty_topic_policy_penalizes_bounded_metrics_and_slots() -> None:
+    topic_words = [
+        [("alpha", 1.0), ("beta", 0.8)],
+        [],
+        [("alpha", 0.9), ("gamma", 0.7)],
+    ]
+
+    metrics = apply_fixed_k_empty_topic_policy(
+        active_metrics={
+            "coherence_c_v": 0.6,
+            "coherence_c_npmi": 0.2,
+            "coherence_c_uci": -2.0,
+            "diversity": 0.75,
+        },
+        topic_words=topic_words,
+        coherences=["c_v", "c_npmi", "c_uci"],
+        diversity_topn=2,
+    )
+
+    assert metrics["coherence_c_v"] == pytest.approx(0.4)
+    assert metrics["coherence_c_npmi"] == pytest.approx(-0.2)
+    assert metrics["coherence_c_uci"] == -2.0
+    assert metrics["coherence_c_v_active_only"] == 0.6
+    assert metrics["coherence_c_npmi_active_only"] == 0.2
+    assert metrics["coherence_c_uci_active_only"] == -2.0
+    assert metrics["diversity"] == 0.5
+    assert metrics["diversity_active_only"] == 0.75
+    assert metrics["topic_utilization"] == pytest.approx(2 / 3)
+    assert metrics["num_active_topics"] == 2.0
+    assert metrics["num_empty_topics"] == 1.0
+    assert metrics["complete_run_rate"] == 0.0
+
+
+def test_fixed_k_empty_topic_policy_is_identity_for_complete_topics() -> None:
+    topic_words = [
+        [("alpha", 1.0), ("beta", 0.8)],
+        [("gamma", 0.9), ("delta", 0.7)],
+    ]
+
+    metrics = apply_fixed_k_empty_topic_policy(
+        active_metrics={"coherence": 0.6, "diversity": 1.0},
+        topic_words=topic_words,
+        coherences=["c_v"],
+        diversity_topn=2,
+    )
+
+    assert metrics["coherence"] == 0.6
+    assert metrics["coherence_active_only"] == 0.6
+    assert metrics["diversity"] == 1.0
+    assert metrics["topic_utilization"] == 1.0
+    assert metrics["complete_run_rate"] == 1.0
 
 
 def test_evaluate_topic_words_returns_both_metrics(monkeypatch) -> None:

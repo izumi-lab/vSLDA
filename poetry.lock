@@ -3550,4 +3550,4 @@ pillow = "*"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.15"
-content-hash = "838baf17f9f9eda8a9ed441759e5082d705a884d46a518293a258e0394aecd1f"
+content-hash = "a6c03afd8b002039bbb33f0dac0309a2820f4b0b8db97586a35c1dc310e166b4"

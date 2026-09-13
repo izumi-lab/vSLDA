@@ -21,7 +21,12 @@ def test_register_builtin_tasks_exposes_classification_tasks() -> None:
     assert "classification" in names
     assert "classification_limited" in names
     assert "classification_summary" in names
+    assert "word_based_summary" in names
     assert "geometry_based_metrics" in names
+    assert "entropy_based_metrics" in names
+    assert "entropy_based_summary" in names
+    assert "topic_pair_metrics" in names
+    assert "topic_pair_summary" in names
     assert "sentence_topic_inspection" in names
     assert "word_based_metrics" in names
     assert "topic_count_diagnostics" in names
@@ -58,7 +63,13 @@ def test_list_run_from_config_tasks_returns_supported_subset() -> None:
     names = [task.name for task in list_run_from_config_tasks()]
     assert "classification" in names
     assert "classification_summary" in names
+    # word_based_summary is run explicitly, not from an experiment config.
+    assert "word_based_summary" not in names
     assert "geometry_based_metrics" in names
+    assert "entropy_based_metrics" in names
+    assert "entropy_based_summary" not in names
+    assert "topic_pair_metrics" in names
+    assert "topic_pair_summary" not in names
     assert "word_based_metrics" in names
     assert "topic_count_diagnostics" in names
     assert "word_based_label_profile" not in names
@@ -93,3 +104,48 @@ def test_resolve_models_for_word_based_metrics_supports_sentlda() -> None:
     )
 
     assert resolved == ["vmf", "ctm", "sentlda"]
+
+
+def test_resolve_models_for_entropy_based_metrics_maps_aliases() -> None:
+    cfg = SimpleNamespace(
+        selection=SimpleNamespace(models=None),
+        baselines=[
+            SimpleNamespace(runner="gaussian"),
+            SimpleNamespace(runner="senclu"),
+            SimpleNamespace(runner="sentlda"),
+        ],
+    )
+
+    resolved = registry_module._resolve_models_for_task(
+        cfg,
+        task_name="entropy_based_metrics",
+    )
+
+    assert resolved == ["vmf", "sentence_gaussianlda", "senclu", "sentlda"]
+
+
+def test_resolve_models_for_topic_pair_metrics_keeps_sentence_level_models() -> None:
+    cfg = SimpleNamespace(
+        selection=SimpleNamespace(models=None),
+        baselines=[
+            SimpleNamespace(runner="gaussian"),
+            SimpleNamespace(runner="bleilda"),
+            SimpleNamespace(runner="sentlda"),
+        ],
+    )
+
+    resolved = registry_module._resolve_models_for_task(
+        cfg,
+        task_name="topic_pair_metrics",
+    )
+
+    assert resolved == ["vmf", "sentence_gaussianlda", "sentlda"]
+
+    explicit = SimpleNamespace(
+        selection=SimpleNamespace(models=["etm"]),
+        baselines=[],
+    )
+    with pytest.raises(ValueError, match="does not support"):
+        registry_module._resolve_models_for_task(
+            explicit, task_name="topic_pair_metrics"
+        )
