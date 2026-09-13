@@ -72,6 +72,14 @@ def load_model_provenance(
                 "embedding_preprocess_variant": axes_payload.get(
                     "embedding_preprocess_variant"
                 ),
+                # Hyperparameter-sweep label (None for the default run) and the training
+                # hyperparameters; both are absent from metadata written before the sweep.
+                "parameter_variant": payload.get("parameter_variant"),
+                "vmf_hyperparameters": (
+                    dict(payload["hyperparameters"])
+                    if isinstance(payload.get("hyperparameters"), dict)
+                    else None
+                ),
             }
         )
     return provenance

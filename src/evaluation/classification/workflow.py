@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from src.baselines.params import format_prior_scale_variant
+from src.baselines.params import (
+    format_covariance_variant,
+    format_prior_scale_variant,
+    normalize_covariance_type,
+)
 from src.core.path_builders import (
     build_archive_result_dir,
     build_latest_result_dir,
@@ -57,6 +61,10 @@ class ClassificationCondition:
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE
     selected_models: Sequence[str] | None = None
     prior_scale: float | None = None
+    covariance_type: str | None = None
+    # Hyperparameter label of the vMF Sentence LDA runs to evaluate (src/core/vmf_variant.py);
+    # None selects the default runs and leaves every path unchanged.
+    vmf_variant: str | None = None
     data_run: str = "default"
     mode: str | None = None
     value: float | int | None = None
@@ -87,6 +95,15 @@ class ClassificationCondition:
             ),
             "prior_scale": self.prior_scale,
         }
+        # Only a reduced covariance type enters the payload, so the condition ids of
+        # every run made before the covariance variants existed are unchanged.
+        if self.covariance_type is not None and format_covariance_variant(
+            self.covariance_type
+        ):
+            payload["covariance_type"] = normalize_covariance_type(self.covariance_type)
+        # Likewise only a vMF hyperparameter variant enters the payload.
+        if self.vmf_variant:
+            payload["vmf_variant"] = str(self.vmf_variant)
         if self.mode is not None:
             payload["mode"] = self.mode
         if self.value is not None:
@@ -132,6 +149,11 @@ class ClassificationCondition:
             )
         if self.prior_scale is not None:
             extra_labels.append(format_prior_scale_variant(self.prior_scale))
+        covariance_label = format_covariance_variant(self.covariance_type)
+        if covariance_label is not None:
+            extra_labels.append(covariance_label)
+        if self.vmf_variant:
+            extra_labels.append(str(self.vmf_variant))
         if self.mode is not None:
             extra_labels.append(self.mode)
         if self.value is not None:
@@ -176,6 +198,12 @@ class ClassificationCondition:
             else sorted(str(item) for item in self.selected_models)
         )
         meta["prior_scale"] = self.prior_scale
+        meta["covariance_type"] = (
+            None
+            if self.covariance_type is None
+            else normalize_covariance_type(self.covariance_type)
+        )
+        meta["vmf_variant"] = self.vmf_variant or None
         meta["display_key"] = self.display_key()
         if self.mode is not None:
             meta["mode"] = self.mode
@@ -207,6 +235,8 @@ def build_classification_condition_payload(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -226,6 +256,8 @@ def build_classification_condition_payload(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -248,6 +280,8 @@ def build_classification_condition_id(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -267,6 +301,8 @@ def build_classification_condition_id(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -377,6 +413,8 @@ def build_classification_meta(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     mode: str | None = None,
     value: float | int | None = None,
     stratified: bool | None = None,
@@ -397,6 +435,8 @@ def build_classification_meta(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         mode=mode,
         value=value,
         stratified=stratified,
@@ -487,6 +527,8 @@ def run_classification_grid(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     write_spec_builder: Callable[[int, str, int], EvaluationWriteSpec],
     train_runner: TrainRunner,
     train_index_resolver: TrainIndexResolver | None = None,
@@ -596,6 +638,8 @@ def run_classification_grid(
                                 feature_resolve_mode=feature_resolve_mode,
                                 selected_models=selected_models,
                                 prior_scale=prior_scale,
+                                covariance_type=covariance_type,
+                                vmf_variant=vmf_variant,
                             )
                             break
                         except ValueError as exc:

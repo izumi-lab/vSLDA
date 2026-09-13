@@ -10,6 +10,7 @@ from src.baselines.models.gaussian_state import (
     GaussianTrainerLike,
     GaussianTrainerState,
     coerce_gaussian_trainer_state,
+    is_reduced_covariance_state,
     validate_gaussian_trainer_state,
 )
 from src.core.artifacts import PickleArtifactSpec, save_json, save_split_pickles
@@ -31,6 +32,8 @@ def build_gaussian_params_payload(
         payload["prior_scale"] = trainer_state.prior_scale
     if trainer_state.prior_nu is not None:
         payload["prior_nu"] = trainer_state.prior_nu
+    if trainer_state.covariance_type is not None:
+        payload["covariance_type"] = str(trainer_state.covariance_type)
     if trainer_state.table_density_kernel_backend is not None:
         payload["table_density_kernel_backend"] = (
             trainer_state.table_density_kernel_backend
@@ -49,6 +52,12 @@ def build_gaussian_params_payload(
         payload["training_corpus_encoding_sec"] = float(
             trainer_state.training_corpus_encoding_sec
         )
+    if trainer_state.iteration_diagnostics:
+        payload["iteration_diagnostics"] = [
+            dict(item) for item in trainer_state.iteration_diagnostics
+        ]
+    if trainer_state.training_elapsed_sec is not None:
+        payload["training_elapsed_sec"] = float(trainer_state.training_elapsed_sec)
     return payload
 
 
@@ -62,6 +71,42 @@ def build_gaussian_state_specs(
     trainer_state = validate_gaussian_trainer_state(
         coerce_gaussian_trainer_state(trainer)
     )
+    if is_reduced_covariance_state(trainer_state):
+        covariance_specs = [
+            PickleArtifactSpec(
+                name="sum_squared_table_customers_diag",
+                filename="sum_squared_table_customers_diag.pkl",
+                payload=trainer_state.sum_squared_table_customers_diag,
+                split="train",
+            ),
+            PickleArtifactSpec(
+                name="table_scaled_variances",
+                filename="table_scaled_variances.pkl",
+                payload=trainer_state.table_scaled_variances,
+                split="train",
+            ),
+        ]
+    else:
+        covariance_specs = [
+            PickleArtifactSpec(
+                name="table_inverse_covariances",
+                filename="table_inverse_covariances.pkl",
+                payload=trainer_state.table_inverse_covariances,
+                split="train",
+            ),
+            PickleArtifactSpec(
+                name="sum_squared_table_customers",
+                filename="sum_squared_table_customers.pkl",
+                payload=trainer_state.sum_squared_table_customers,
+                split="train",
+            ),
+            PickleArtifactSpec(
+                name="table_cholesky_ltriangular_mat",
+                filename="table_cholesky_ltriangular_mat.pkl",
+                payload=trainer_state.table_cholesky_ltriangular_mat,
+                split="train",
+            ),
+        ]
     return [
         PickleArtifactSpec(
             name="train_path",
@@ -88,12 +133,6 @@ def build_gaussian_state_specs(
             split="train",
         ),
         PickleArtifactSpec(
-            name="table_inverse_covariances",
-            filename="table_inverse_covariances.pkl",
-            payload=trainer_state.table_inverse_covariances,
-            split="train",
-        ),
-        PickleArtifactSpec(
             name="log_determinants",
             filename="log_determinants.pkl",
             payload=trainer_state.log_determinants,
@@ -105,18 +144,7 @@ def build_gaussian_state_specs(
             payload=trainer_state.sum_table_customers,
             split="train",
         ),
-        PickleArtifactSpec(
-            name="sum_squared_table_customers",
-            filename="sum_squared_table_customers.pkl",
-            payload=trainer_state.sum_squared_table_customers,
-            split="train",
-        ),
-        PickleArtifactSpec(
-            name="table_cholesky_ltriangular_mat",
-            filename="table_cholesky_ltriangular_mat.pkl",
-            payload=trainer_state.table_cholesky_ltriangular_mat,
-            split="train",
-        ),
+        *covariance_specs,
     ]
 
 

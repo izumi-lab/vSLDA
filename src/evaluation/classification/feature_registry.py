@@ -7,7 +7,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from src.baselines.params import format_prior_scale_variant
+from src.baselines.params import (
+    format_covariance_variant,
+    format_prior_scale_variant,
+    normalize_covariance_type,
+)
 from src.core.artifacts import (
     CURRENT_POINTER_FILENAME,
     METADATA_FILENAME,
@@ -23,6 +27,12 @@ from src.core.paths import (
     resolve_project_path,
     resolve_vmf_experiment_dir,
 )
+from src.core.vmf_assignment import (
+    VMF_ASSIGNMENTS,
+    VMF_DISPLAY_SUFFIX,
+    mvtm_doc_topic_relpath,
+)
+from src.core.vmf_variant import vmf_variant_matches
 from src.data.preprocessing import PreprocessedDocument
 from src.data.preprocessing_selection import (
     parse_raw_doc_indices,
@@ -107,6 +117,9 @@ def resolve_feature_catalog_entry(
             "source_condition_id": display_key,
             "source_condition_fingerprint": condition_fingerprint,
             "prior_scale": None,
+            "covariance_type": None,
+            "vmf_variant": None,
+            "vmf_hyperparameters": None,
             "encoder_config": encoder_config,
         }
 
@@ -120,11 +133,17 @@ def resolve_feature_catalog_entry(
         condition_fingerprint or _metadata_condition_fingerprint(metadata)
     )
     prior_scale = None
+    covariance_type = None
     if spec.model_key in {"gaussianlda", "sentence_gaussianlda"}:
         prior_scale = (
             baseline_params.get("prior_scale", 0.1)
             if baseline_params is not None
             else 0.1
+        )
+    if spec.model_key == "sentence_gaussianlda":
+        covariance_type = _artifact_covariance_type(
+            parameter_variant=metadata.get("parameter_variant"),
+            baseline_params=baseline_params,
         )
     return {
         "feature_name": feature_name,
@@ -141,6 +160,20 @@ def resolve_feature_catalog_entry(
         "source_condition_id": source_condition_id,
         "source_condition_fingerprint": source_condition_fingerprint,
         "prior_scale": prior_scale,
+        "covariance_type": covariance_type,
+        # vMF hyperparameter-sweep provenance (None / absent for the default runs and for
+        # metadata written before the sweep).
+        "vmf_variant": (
+            metadata.get("parameter_variant")
+            if spec.model_key == "vmf_sentence_lda"
+            else None
+        ),
+        "vmf_hyperparameters": (
+            dict(metadata["hyperparameters"])
+            if spec.model_key == "vmf_sentence_lda"
+            and isinstance(metadata.get("hyperparameters"), dict)
+            else None
+        ),
         "encoder_config": encoder_config or _metadata_encoder_config(metadata),
     }
 
@@ -244,6 +277,8 @@ _BASELINE_TRAIN_FILENAMES: dict[str, str] = {
     "sentence_gaussianlda": "table_counts_per_doc.pkl",
     "sentlda": "table_counts_per_doc.pkl",
     "bertopic_kmeans": "bertopic_kmeans.pkl",
+    "sam": "sam.pkl",
+    "sam_tf": "sam.pkl",
 }
 
 _SENTENCE_EMBEDDING_FILTERED_MODELS = {
@@ -329,6 +364,12 @@ def _pointer_variant_values(
         cleaned = _clean_variant(encoder_config.get("embedding_variant"))
         if cleaned is not None:
             values.add(cleaned)
+        # The encoder's model name (``all-MiniLM-L6-v2``, ``BAAI/bge-base-en-v1.5``): the
+        # drivers request encoders by that name, and a run that no experiment summary
+        # records (e.g. fetched from another host) is reachable only through its pointer.
+        model_name = _clean_variant(encoder_config.get("model_name"))
+        if model_name is not None:
+            values.add(model_name)
     return values
 
 
@@ -371,12 +412,73 @@ def _variant_value_matches(*, value: str, requested: str) -> bool:
     )
 
 
+def _prior_scale_component(parameter_variant: str) -> str:
+    return parameter_variant.split("_cov-", 1)[0]
+
+
+def _artifact_covariance_type(
+    *,
+    parameter_variant: object,
+    baseline_params: Mapping[str, Any] | None,
+) -> str:
+    """Covariance type of a recorded sentence Gaussian LDA run (unrecorded means full)."""
+    if isinstance(baseline_params, Mapping) and baseline_params.get("covariance_type"):
+        return normalize_covariance_type(baseline_params.get("covariance_type"))
+    if isinstance(parameter_variant, str) and "_cov-" in parameter_variant:
+        label = parameter_variant.split("_cov-", 1)[1]
+        return {"iso": "spherical", "diag": "diag"}.get(label, "full")
+    return "full"
+
+
+def _covariance_type_matches(
+    *,
+    model_key: str,
+    pointer_payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    covariance_type: str | None,
+) -> bool:
+    """Keep only the requested covariance type of the sentence Gaussian LDA.
+
+    ``None`` means the default (full), so the reduced variants never enter a table
+    unless asked for; other models are unaffected.
+    """
+    if model_key != "sentence_gaussianlda":
+        return True
+    requested = normalize_covariance_type(covariance_type)
+    recorded = _artifact_covariance_type(
+        parameter_variant=pointer_payload.get("parameter_variant"),
+        baseline_params=metadata.get("baseline_params"),
+    )
+    return recorded == requested
+
+
+def _vmf_variant_matches(
+    *,
+    model_key: str,
+    pointer_payload: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    vmf_variant: str | None,
+) -> bool:
+    """Keep only the requested hyperparameter variant of the vMF Sentence LDA.
+
+    ``None`` means the default runs, so the sensitivity-sweep runs (``kappa0-100`` and the
+    like) never enter a table unless asked for; other models are unaffected.
+    """
+    if model_key != "vmf_sentence_lda":
+        return True
+    recorded = pointer_payload.get("parameter_variant")
+    if recorded is None:
+        recorded = metadata.get("parameter_variant")
+    return vmf_variant_matches(recorded, vmf_variant)
+
+
 def _prior_scale_matches(
     *,
     model_key: str,
     pointer_payload: Mapping[str, Any],
     metadata: Mapping[str, Any],
     prior_scale: float | None,
+    covariance_type: str | None = None,
 ) -> bool:
     if prior_scale is None or model_key not in {
         "gaussianlda",
@@ -387,7 +489,9 @@ def _prior_scale_matches(
     expected = format_prior_scale_variant(prior_scale)
     parameter_variant = pointer_payload.get("parameter_variant")
     if parameter_variant is not None:
-        return str(parameter_variant) == expected
+        # The variant may carry a covariance label after the prior scale
+        # (``psi0-0p1_cov-iso``); only the prior-scale component is compared here.
+        return _prior_scale_component(str(parameter_variant)) == expected
 
     baseline_params = metadata.get("baseline_params")
     if isinstance(baseline_params, Mapping) and "prior_scale" in baseline_params:
@@ -529,6 +633,50 @@ def _resolve_pointer_artifact_pair(
 ) -> tuple[Path, Path] | None:
     raw_artifacts = pointer_payload.get("artifacts")
     artifacts = raw_artifacts if isinstance(raw_artifacts, Mapping) else {}
+    if model_key == "mvtm" and vmf_assignment in {"foldin", "foldincounts"}:
+        # MvTM shares the vMF estimators; its fold-in files (written at training
+        # time and by ``evaluation vmf-foldin-theta --model mvtm``) are named
+        # through the same pointer keys, with the baseline layout as fallback.
+        keys_by_split = (
+            {
+                "train": ("train_doc_topic_foldin", "doc_topic_train_foldin"),
+                "test": ("test_doc_topic_foldin", "doc_topic_test_foldin"),
+            }
+            if vmf_assignment == "foldin"
+            else {
+                "train": (
+                    "train_doc_topic_foldin_counts",
+                    "doc_topic_train_foldin_counts",
+                ),
+                "test": (
+                    "test_doc_topic_foldin_counts",
+                    "doc_topic_test_foldin_counts",
+                ),
+            }
+        )
+        train_path = _artifact_path(
+            archive_dir=archive_dir, artifacts=artifacts, keys=keys_by_split["train"]
+        ) or archive_dir / mvtm_doc_topic_relpath(
+            "train", vmf_assignment, category=category
+        )
+        test_path = _artifact_path(
+            archive_dir=archive_dir, artifacts=artifacts, keys=keys_by_split["test"]
+        ) or archive_dir / mvtm_doc_topic_relpath(
+            "test", vmf_assignment, category=category
+        )
+        return train_path, test_path
+    if model_key == "mvtm" and vmf_assignment == "soft":
+        train_path = _artifact_path(
+            archive_dir=archive_dir,
+            artifacts=artifacts,
+            keys=("train_doc_topic_soft",),
+        ) or archive_dir / mvtm_doc_topic_relpath("train", "soft", category=category)
+        test_path = _artifact_path(
+            archive_dir=archive_dir,
+            artifacts=artifacts,
+            keys=("test_doc_topic_soft",),
+        ) or archive_dir / mvtm_doc_topic_relpath("test", "soft", category=category)
+        return train_path, test_path
     if model_key == "vmf_sentence_lda":
         if vmf_assignment == "soft":
             train_path = (
@@ -546,6 +694,50 @@ def _resolve_pointer_artifact_pair(
                     keys=("test_doc_topic_soft", "doc_topic_test_soft"),
                 )
                 or archive_dir / "doc_topic_test_soft.pkl"
+            )
+        elif vmf_assignment == "foldin":
+            # Written after training by ``evaluation vmf-foldin-theta``; older
+            # pointers lack the keys, so the file name is the fallback.
+            train_path = (
+                _artifact_path(
+                    archive_dir=archive_dir,
+                    artifacts=artifacts,
+                    keys=("train_doc_topic_foldin", "doc_topic_train_foldin"),
+                )
+                or archive_dir / "doc_topic_train_foldin.pkl"
+            )
+            test_path = (
+                _artifact_path(
+                    archive_dir=archive_dir,
+                    artifacts=artifacts,
+                    keys=("test_doc_topic_foldin", "doc_topic_test_foldin"),
+                )
+                or archive_dir / "doc_topic_test_foldin.pkl"
+            )
+        elif vmf_assignment == "foldincounts":
+            # Expected fold-in counts E[n_dk] of the same command; the feature
+            # loader row-normalizes them to E[n_dk] / N_d.
+            train_path = (
+                _artifact_path(
+                    archive_dir=archive_dir,
+                    artifacts=artifacts,
+                    keys=(
+                        "train_doc_topic_foldin_counts",
+                        "doc_topic_train_foldin_counts",
+                    ),
+                )
+                or archive_dir / "doc_topic_train_foldin_counts.pkl"
+            )
+            test_path = (
+                _artifact_path(
+                    archive_dir=archive_dir,
+                    artifacts=artifacts,
+                    keys=(
+                        "test_doc_topic_foldin_counts",
+                        "doc_topic_test_foldin_counts",
+                    ),
+                )
+                or archive_dir / "doc_topic_test_foldin_counts.pkl"
             )
         else:
             train_path = (
@@ -697,6 +889,8 @@ def _resolve_latest_feature_artifacts(
     embedding_variants: Sequence[str] | None,
     feature_resolve_mode: str,
     prior_scale: float | None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> list[ResolvedFeatureArtifact]:
     latest_root = _latest_root_for_spec(
         model_key=spec.model_key,
@@ -746,6 +940,20 @@ def _resolve_latest_feature_artifacts(
             prior_scale=prior_scale,
         ):
             continue
+        if not _covariance_type_matches(
+            model_key=spec.model_key,
+            pointer_payload=pointer_payload,
+            metadata=metadata,
+            covariance_type=covariance_type,
+        ):
+            continue
+        if not _vmf_variant_matches(
+            model_key=spec.model_key,
+            pointer_payload=pointer_payload,
+            metadata=metadata,
+            vmf_variant=vmf_variant,
+        ):
+            continue
         artifact_pair = _resolve_pointer_artifact_pair(
             model_key=spec.model_key,
             archive_dir=archive_dir,
@@ -763,6 +971,15 @@ def _resolve_latest_feature_artifacts(
         encoder_config = pointer_payload.get("encoder_config") or metadata.get(
             "encoder_config"
         )
+        # The archive metadata of a swept vMF run may record no parameter_variant while
+        # its pointer does; the provenance (vmf_variant) is built from the metadata, so
+        # carry the pointer's value over rather than record the run as the default one.
+        pointer_variant = _clean_variant(pointer_payload.get("parameter_variant"))
+        if (
+            pointer_variant is not None
+            and _clean_variant(metadata.get("parameter_variant")) is None
+        ):
+            metadata = {**metadata, "parameter_variant": pointer_variant}
         resolved.append(
             ResolvedFeatureArtifact(
                 train_path=train_path,
@@ -804,6 +1021,13 @@ def _resolve_latest_feature_artifacts(
         "sentence_gaussianlda",
     }:
         expected_variant = format_prior_scale_variant(prior_scale)
+        covariance_label = (
+            format_covariance_variant(covariance_type)
+            if spec.model_key == "sentence_gaussianlda"
+            else None
+        )
+        if covariance_label is not None:
+            expected_variant = f"{expected_variant}_{covariance_label}"
         preferred = [
             artifact
             for artifact in resolved
@@ -814,8 +1038,38 @@ def _resolve_latest_feature_artifacts(
             or artifact.metadata.get("parameter_variant") == expected_variant
         ]
         if preferred:
-            return preferred
-    return resolved
+            return _prefer_normalized(spec, preferred, embedding_variants)
+    return _prefer_normalized(spec, resolved, embedding_variants)
+
+
+def _prefer_normalized(spec, artifacts, embedding_variants):
+    """Keep only the L2-normalized GSLDA runs when a bare encoder was requested.
+
+    A bare encoder variant ("minilm") matches both the unnormalized runs
+    ("minilm_raw") and the normalized ones ("minilm_norm"), because
+    _variant_value_matches accepts any "<requested>_*" suffix. The manuscript
+    reports the normalized runs, and returning both makes the classification
+    scores carry two GSLDA columns, which make_tables rejects. An explicit
+    "minilm_raw" still selects the unnormalized runs.
+
+    Requesting no variant at all matches every run of every encoder, so the
+    same collision happens there and the normalized runs are preferred too.
+
+    Applied to the prior-scale branch as well: the Psi_0 sweep has raw and
+    normalized runs under the same parameter variant, so filtering only after
+    that branch would let both through.
+    """
+    if spec.model_key != "sentence_gaussianlda":
+        return artifacts
+    requested = {str(item).strip() for item in (embedding_variants or [])}
+    if any(item.endswith(("_raw", "_norm")) for item in requested if item):
+        return artifacts
+    preferred = [
+        artifact
+        for artifact in artifacts
+        if str(artifact.embedding_variant or "").endswith("_norm")
+    ]
+    return preferred or artifacts
 
 
 def _baseline_feature_spec(
@@ -825,15 +1079,30 @@ def _baseline_feature_spec(
     train_loader: FeatureLoader = load_topic_distribution,
     test_loader: FeatureLoader = load_topic_distribution,
     available_index_resolver: AvailableIndexResolver | None = None,
+    assignment: str | None = None,
 ) -> FeatureSpec:
     return FeatureSpec(
         model_key=model_key,
         display_name=display_name,
         train_path_resolver=lambda dataset, data_run, iteration, num_topics, category: _resolve_baseline_doc_topic_path(
-            model_key, dataset, data_run, iteration, num_topics, category, "train"
+            model_key,
+            dataset,
+            data_run,
+            iteration,
+            num_topics,
+            category,
+            "train",
+            assignment=assignment,
         ),
         test_path_resolver=lambda dataset, data_run, iteration, num_topics, category: _resolve_baseline_doc_topic_path(
-            model_key, dataset, data_run, iteration, num_topics, category, "test"
+            model_key,
+            dataset,
+            data_run,
+            iteration,
+            num_topics,
+            category,
+            "test",
+            assignment=assignment,
         ),
         train_loader=train_loader,
         test_loader=test_loader,
@@ -849,6 +1118,7 @@ def _resolve_baseline_doc_topic_path(
     num_topics: int,
     category: str,
     split: str,
+    assignment: str | None = None,
 ) -> Path:
     try:
         condition_dir = resolve_baseline_condition_dir(
@@ -868,6 +1138,7 @@ def _resolve_baseline_doc_topic_path(
             category=category,
             split=split,
             data_run=data_run,
+            assignment=assignment,
         )
     else:
         path = build_baseline_doc_topic_path(
@@ -879,6 +1150,7 @@ def _resolve_baseline_doc_topic_path(
             split=split,
             data_run=data_run,
             condition_id=condition_dir.name,
+            assignment=assignment,
         )
     if path is None:
         raise ValueError(
@@ -929,13 +1201,22 @@ def _build_gaussian_feature_spec(_: str) -> FeatureSpec:
     )
 
 
-def _build_mvtm_feature_spec(_: str) -> FeatureSpec:
+def _build_mvtm_feature_spec(vmf_assignment: str) -> FeatureSpec:
+    """MvTM shares the vMF-family estimators (``vmf_assignment``): its ``hard``
+    files are the historical ones, ``foldin`` / ``foldincounts`` read the token-unit
+    fold-in written at training time or by ``vmf-foldin-theta --model mvtm``. The
+    display name stays ``MvTM``; the estimator is recorded in the run's condition
+    key and in the summary provenance."""
+
+    if vmf_assignment not in VMF_ASSIGNMENTS:
+        raise ValueError(f"Unknown vmf_assignment: {vmf_assignment}")
     return _baseline_feature_spec(
         model_key="mvtm",
         display_name="MvTM",
         available_index_resolver=_baseline_available_resolver(
             require_document_tokens=True,
         ),
+        assignment=vmf_assignment,
     )
 
 
@@ -944,6 +1225,27 @@ def _build_etm_feature_spec(_: str) -> FeatureSpec:
         model_key="etm",
         display_name="ETM",
         available_index_resolver=_etm_available_resolver,
+    )
+
+
+def _build_sam_feature_spec(_: str) -> FeatureSpec:
+    # SAM prunes its vocabulary and drops out-of-vocabulary documents, exactly as
+    # ETM does, so it needs the vocabulary-aware resolver rather than the plain
+    # token-presence one that bleilda uses.
+    return _baseline_feature_spec(
+        model_key="sam",
+        display_name="SAM (tf-idf)",
+        available_index_resolver=_sam_available_resolver,
+    )
+
+
+def _build_sam_tf_feature_spec(_: str) -> FeatureSpec:
+    # Same artifacts as SAM; only the input representation (tf vs tf-idf)
+    # differs, so the vocabulary-aware resolver is shared.
+    return _baseline_feature_spec(
+        model_key="sam_tf",
+        display_name="SAM",
+        available_index_resolver=_sam_available_resolver,
     )
 
 
@@ -1025,12 +1327,9 @@ def _build_sentlda_feature_spec(_: str) -> FeatureSpec:
 
 
 def _build_vmf_feature_spec(vmf_assignment: str) -> FeatureSpec:
-    if vmf_assignment == "soft":
-        vmf_display_name = "vMF Sentence LDA (soft)"
-    elif vmf_assignment == "hard":
-        vmf_display_name = "vMF Sentence LDA"
-    else:
+    if vmf_assignment not in VMF_ASSIGNMENTS:
         raise ValueError(f"Unknown vmf_assignment: {vmf_assignment}")
+    vmf_display_name = "vMF Sentence LDA" + VMF_DISPLAY_SUFFIX[vmf_assignment]
     return FeatureSpec(
         model_key="vmf_sentence_lda",
         display_name=vmf_display_name,
@@ -1208,6 +1507,35 @@ def _etm_available_resolver(
     )
 
 
+def _sam_available_resolver(
+    dataset: str,
+    category: str,
+    train_path: Path,
+    _test_path: Path,
+    target_column: str,
+    label_schema: str,
+) -> tuple[SplitAlignment, SplitAlignment]:
+    metadata = _load_feature_metadata(train_path)
+    vocabulary_path = train_path.parent / "vocabulary.json"
+    vocabulary_payload = load_artifact_json(vocabulary_path)
+    if isinstance(vocabulary_payload, (dict, list)):
+        vocabulary = {str(token) for token in vocabulary_payload}
+    else:
+        raise ValueError(f"Invalid SAM vocabulary artifact: {vocabulary_path}")
+
+    return build_preprocessed_available_indices(
+        dataset,
+        category,
+        metadata,
+        availability_predicate=lambda document: _document_has_vocabulary_token(
+            document,
+            vocabulary,
+        ),
+        target_column=target_column,
+        label_schema=label_schema,
+    )
+
+
 def _vmf_available_resolver(
     dataset: str,
     category: str,
@@ -1311,6 +1639,10 @@ def _document_has_vocabulary_token(
 FEATURE_REGISTRY: dict[str, FeatureSpecBuilder] = {
     "ctm": _build_ctm_feature_spec,
     "bleilda": _build_blei_feature_spec,
+    # tf first: it is the reported SAM condition, and this order drives the model
+    # order in the classification summaries.
+    "sam_tf": _build_sam_tf_feature_spec,
+    "sam": _build_sam_feature_spec,
     "bertopic_kmeans": _build_bertopic_kmeans_feature_spec,
     "gaussianlda": _build_gaussian_feature_spec,
     "etm": _build_etm_feature_spec,
@@ -1353,6 +1685,8 @@ def iter_available_features(
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> list[tuple[FeatureSpec, Path, Path]]:
     if feature_resolve_mode not in {"all", "strict"}:
         raise ValueError(f"Unknown feature_resolve_mode: {feature_resolve_mode}")
@@ -1381,6 +1715,8 @@ def iter_available_features(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         )
         if latest_artifacts:
             for artifact in latest_artifacts:
@@ -1400,6 +1736,12 @@ def iter_available_features(
             and spec.model_key in {"gaussianlda", "sentence_gaussianlda"}
             and format_prior_scale_variant(prior_scale) != "psi0-0p1"
         ):
+            continue
+        if (
+            spec.model_key == "sentence_gaussianlda"
+            and format_covariance_variant(covariance_type) is not None
+        ):
+            # Reduced-covariance runs exist only under the latest pointers.
             continue
 
         try:

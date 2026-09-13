@@ -292,6 +292,125 @@ def test_baseline_encoder_params_override_global_encoder(tmp_path: Path) -> None
     assert cfg.baselines[0].params.contextual_encode_prefix == "explicit: "
 
 
+def test_config_runner_sam_means_the_tf_condition(tmp_path: Path) -> None:
+    """``runner: sam`` in a config resolves to the tf runner.
+
+    SAM is reported as the tf condition, so that is what a config asking for "sam"
+    must get.  The registry keys are deliberately not renamed -- they are baked into
+    artifact paths and into evaluation condition fingerprints, which include the
+    model name -- so an alias carries the config-facing name onto the key instead.
+    """
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [{"name": "SAM", "runner": "sam"}]
+
+    cfg = load_config(_write_config(tmp_path, payload))
+
+    assert [b.runner for b in cfg.baselines] == ["sam_tf", "sam"]
+    assert [b.name for b in cfg.baselines] == ["SAM", "SAM (tf-idf)"]
+    assert cfg.baselines[0].params.feature_scheme == "tf"
+    assert cfg.baselines[1].params.feature_scheme == "tfidf"
+
+
+def test_config_runner_sam_tfidf_selects_only_the_variant(tmp_path: Path) -> None:
+    """``sam_tfidf`` names the variant explicitly and pulls in no companion."""
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [{"name": "SAM (tf-idf)", "runner": "sam_tfidf"}]
+
+    cfg = load_config(_write_config(tmp_path, payload))
+
+    assert [b.runner for b in cfg.baselines] == ["sam"]
+    assert cfg.baselines[0].params.feature_scheme == "tfidf"
+
+
+def test_sam_config_entry_also_schedules_the_tfidf_companion(tmp_path: Path) -> None:
+    """`runner: sam_tf` implies `sam`; configs never spell the companion out.
+
+    The paper's tf and tf-idf conditions are always wanted together, so the registry
+    pairs them.  tf is the parent because it is the reported condition -- it is the
+    input the other bag-of-words baselines get -- and tuning applied to it carries
+    over to the variant, except ``feature_scheme``, which is what separates them.
+    """
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"name": "SAM", "runner": "sam_tf", "params": {"num_iterations": 7}},
+        {"name": "Blei LDA", "runner": "bleilda"},
+    ]
+
+    cfg = load_config(_write_config(tmp_path, payload))
+
+    assert [baseline.runner for baseline in cfg.baselines] == [
+        "sam_tf",
+        "sam",
+        "bleilda",
+    ]
+    companion = cfg.baselines[1]
+    assert companion.name == "SAM (tf-idf)"
+    # Tuning carries over, but the feature scheme is what separates the two
+    # conditions, so each runner keeps its own.
+    assert companion.params.num_iterations == 7
+    assert companion.params.feature_scheme == "tfidf"
+    assert cfg.baselines[0].params.feature_scheme == "tf"
+
+
+def test_explicit_tfidf_entry_is_not_duplicated_by_the_companion(
+    tmp_path: Path,
+) -> None:
+    """Spelling the variant out keeps its own params instead of the inherited ones.
+
+    ``sam`` is the tf condition and ``sam_tfidf`` the variant, so a config naming
+    both must end up with exactly those two runners -- the companion must notice
+    the variant is already configured rather than appending a second copy.
+    """
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["baselines"] = [
+        {"name": "SAM", "runner": "sam"},
+        {
+            "name": "SAM (tf-idf)",
+            "runner": "sam_tfidf",
+            "params": {"num_iterations": 3},
+        },
+    ]
+
+    cfg = load_config(_write_config(tmp_path, payload))
+
+    assert [baseline.runner for baseline in cfg.baselines] == ["sam_tf", "sam"]
+    assert cfg.baselines[1].params.num_iterations == 3
+    assert cfg.baselines[0].params.feature_scheme == "tf"
+    assert cfg.baselines[1].params.feature_scheme == "tfidf"
+
+
 def test_resolve_run_selection_type_hints_are_evaluable() -> None:
     hints = typing.get_type_hints(resolve_run_selection)
 
@@ -321,6 +440,7 @@ def test_load_config_supports_runtime_and_vmf_inference_blocks(tmp_path: Path) -
     assert cfg.runtime.seed_base == 99
     assert cfg.runtime.num_workers == 6
     assert cfg.vmf.inference.soft_temperature == 0.7
+    assert cfg.vmf.inference.foldin is True
 
 
 def test_load_config_supports_extends_override(tmp_path: Path) -> None:
@@ -1127,3 +1247,175 @@ def test_resolve_model_selection_prefers_cli_overrides(tmp_path: Path) -> None:
         "ctm",
         "gaussianlda",
     }
+
+
+def test_vmf_hyperparameter_override_labels_only_changed_values(tmp_path: Path) -> None:
+    from src.experiments.vmf_runner import vmf_parameter_variant
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["train"] = {
+        "num_topics": [20],
+        "num_iterations": 10,
+        "kappa_default": 10.0,
+        "gibbs_sweeps": 20,
+        "num_samples": 8,
+    }
+    path = _write_config(tmp_path, payload)
+
+    plain = load_config(path)
+    assert plain.train.hyperparameter_overrides == ()
+    assert vmf_parameter_variant(plain.train, num_topics=20) is None
+
+    same = load_config(path, kappa0=10.0, gibbs_sweeps=20)
+    assert same.train.hyperparameter_overrides == ()
+    assert vmf_parameter_variant(same.train, num_topics=20) is None
+
+    swept = load_config(path, kappa0=100.0, num_iterations=5)
+    assert swept.train.kappa_default == pytest.approx(100.0)
+    assert swept.train.num_iterations == 5
+    assert swept.train.hyperparameter_overrides == ("kappa0", "num_iterations")
+    assert vmf_parameter_variant(swept.train, num_topics=20) == "kappa0-100_t-5"
+
+    alpha = load_config(path, alpha0=0.1)
+    assert alpha.train.alpha == pytest.approx(0.1)
+    assert vmf_parameter_variant(alpha.train, num_topics=20) == "alpha0-0p1"
+
+    with pytest.raises(ValueError, match="num_samples"):
+        load_config(path, num_samples=40)
+
+
+def test_encoder_device_override_does_not_change_the_condition(tmp_path: Path) -> None:
+    """A GPU-less host must train the same condition, so device stays out of the fingerprint."""
+    from types import SimpleNamespace
+
+    from src.experiments.vmf_runner import build_vmf_condition_payload
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        },
+        encoder={
+            "model_name": "sentence-transformers/all-minilm-l6-v2",
+            "device": "cuda",
+        },
+    )
+    path = _write_config(tmp_path, payload)
+
+    gpu = load_config(path)
+    cpu = load_config(path, encoder_device="auto")
+    assert gpu.encoder.device == "cuda"
+    assert cpu.encoder.device == "auto"
+
+    def payload_of(cfg):
+        job = SimpleNamespace(
+            config=cfg,
+            data_run_name="default",
+            train_csvs=(Path("data/train.csv"),),
+            test_csvs=(Path("data/test.csv"),),
+            fiscal_years=None,
+            iteration=0,
+            num_topics=20,
+            category="all",
+            vmf_soft_temp=1.0,
+        )
+        return build_vmf_condition_payload(job, algorithm_variant="single")
+
+    assert payload_of(gpu) == payload_of(cpu)
+
+
+def test_saem_hyperparameter_override_labels_and_validates(tmp_path: Path) -> None:
+    from src.experiments.vmf_runner import vmf_hyperparameters, vmf_parameter_variant
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["train"] = {
+        "num_topics": [20],
+        "num_iterations": 10,
+        "kappa_default": 10.0,
+        "gibbs_sweeps": 20,
+        "num_samples": 8,
+        "saem_burn_in": 5,
+        "saem_decay": 1.0,
+        "kappa_solver": "newton",
+    }
+    path = _write_config(tmp_path, payload)
+
+    same = load_config(path, saem_burn_in=5, saem_decay=1.0)
+    assert same.train.hyperparameter_overrides == ()
+    assert vmf_parameter_variant(same.train, num_topics=20) is None
+    recorded = vmf_hyperparameters(same.train, num_topics=20)
+    assert recorded["saem_burn_in"] == 5 and recorded["saem_decay"] == pytest.approx(
+        1.0
+    )
+
+    burn = load_config(path, saem_burn_in=10)
+    assert burn.train.saem_burn_in == 10
+    assert burn.train.hyperparameter_overrides == ("saem_burn_in",)
+    assert vmf_parameter_variant(burn.train, num_topics=20) == "t0-10"
+
+    decay = load_config(path, saem_decay=0.8)
+    assert decay.train.saem_decay == pytest.approx(0.8)
+    assert vmf_parameter_variant(decay.train, num_topics=20) == "a-0p8"
+
+    with pytest.raises(ValueError, match="saem-burn-in"):
+        load_config(path, saem_burn_in=11)
+    with pytest.raises(ValueError, match="saem-decay"):
+        load_config(path, saem_decay=0.5)
+
+
+def test_saem_default_override_is_not_a_variant_without_yaml_keys(
+    tmp_path: Path,
+) -> None:
+    """A YAML without the SAEM keys runs the default SAEM; passing the default value
+    on the command line is not an override, and null restores the plain MCEM."""
+    from src.experiments.vmf_runner import vmf_hyperparameters, vmf_parameter_variant
+
+    payload = _minimal_config_payload(
+        dataset={
+            "name": "dummy",
+            "train_csv": "data/train.csv",
+            "test_csv": "data/test.csv",
+            "categories": {"all": None},
+        }
+    )
+    payload["train"] = {
+        "num_topics": [20],
+        "num_iterations": 10,
+        "gibbs_sweeps": 20,
+        "num_samples": 8,
+    }
+    path = _write_config(tmp_path, payload)
+
+    plain_yaml = load_config(path)
+    assert plain_yaml.train.saem_burn_in == 5
+    assert plain_yaml.train.kappa_solver == "newton"
+    assert vmf_hyperparameters(plain_yaml.train, num_topics=20)["saem_burn_in"] == 5
+
+    same = load_config(path, saem_burn_in=5, saem_decay=1.0)
+    assert same.train.hyperparameter_overrides == ()
+    assert vmf_parameter_variant(same.train, num_topics=20) is None
+
+    burn = load_config(path, saem_burn_in=8)
+    assert burn.train.hyperparameter_overrides == ("saem_burn_in",)
+    assert vmf_parameter_variant(burn.train, num_topics=20) == "t0-8"
+
+    payload["train"]["saem_burn_in"] = None
+    (tmp_path / "null").mkdir()
+    null_path = _write_config(tmp_path / "null", payload)
+    assert load_config(null_path).train.saem_burn_in is None

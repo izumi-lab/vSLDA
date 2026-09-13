@@ -158,7 +158,36 @@ def _resolve_models_for_task(
             "gaussian_kmeans",
             "movmf",
             "gaussian_mixture",
+            "etm",
+            "sam",
+            "sam_tf",
         }
+    elif task_name == "entropy_based_metrics":
+        aliases = {
+            "vmf_sentence_lda": "vmf",
+            "vmf": "vmf",
+            "gaussian": "sentence_gaussianlda",
+        }
+        supported = {
+            "vmf",
+            "bleilda",
+            "sentlda",
+            "sentence_gaussianlda",
+            "gaussianlda",
+            "mvtm",
+            "etm",
+            "ctm",
+            "senclu",
+            "sam",
+            "sam_tf",
+        }
+    elif task_name == "topic_pair_metrics":
+        aliases = {
+            "vmf_sentence_lda": "vmf",
+            "vmf": "vmf",
+            "gaussian": "sentence_gaussianlda",
+        }
+        supported = {"vmf", "sentlda", "sentence_gaussianlda"}
     else:
         raise ValueError(f"Task '{task_name}' does not use model selection.")
 
@@ -256,6 +285,46 @@ def _run_geometry_based_metrics_from_config(context: RunFromConfigContext) -> No
             )
 
 
+def _run_entropy_based_metrics_from_config(context: RunFromConfigContext) -> None:
+    models = _resolve_models_for_task(context.cfg, task_name="entropy_based_metrics")
+    embedding_variants = context.embedding_variants or [
+        context.cfg.encoder.embedding_variant
+    ]
+    for embedding_variant in embedding_variants:
+        run_task(
+            "entropy_based_metrics",
+            models=models,
+            dataset=context.cfg.dataset.name,
+            data_runs=context.data_run_names,
+            iterations=context.iterations,
+            num_topics=[int(topic) for topic in context.topics],
+            categories=context.categories,
+            embedding_variant=embedding_variant,
+            encoder_model=context.cfg.encoder.model_name,
+        )
+
+
+def _run_topic_pair_metrics_from_config(context: RunFromConfigContext) -> None:
+    models = _resolve_models_for_task(context.cfg, task_name="topic_pair_metrics")
+    embedding_variants = context.embedding_variants or [
+        context.cfg.encoder.embedding_variant
+    ]
+    for embedding_variant in embedding_variants:
+        run_task(
+            "topic_pair_metrics",
+            models=models,
+            dataset=context.cfg.dataset.name,
+            data_runs=context.data_run_names,
+            iterations=context.iterations,
+            num_topics=[int(topic) for topic in context.topics],
+            categories=context.categories,
+            embedding_variant=embedding_variant,
+            encoder_model=context.cfg.encoder.model_name,
+            target_column=context.target_column,
+            label_schema=context.label_schema,
+        )
+
+
 def _run_word_based_metrics_from_config(context: RunFromConfigContext) -> None:
     models = _resolve_models_for_task(context.cfg, task_name="word_based_metrics")
     run_task(
@@ -301,11 +370,18 @@ def register_builtin_tasks() -> None:
     from src.evaluation.diagnostics.topic_count_diagnostics import (
         run_topic_count_diagnostics,
     )
+    from src.evaluation.entropy_based.metrics import run_entropy_based_metrics
+    from src.evaluation.entropy_based.summary import run_entropy_based_summary
+    from src.evaluation.foldin.runner import run_vmf_foldin_theta
     from src.evaluation.geometry_based.metrics import run_geometry_based_metrics
+    from src.evaluation.reports.topic_sweep import run_topic_sweep_summary
+    from src.evaluation.topic_pairs.metrics import run_topic_pair_metrics
+    from src.evaluation.topic_pairs.summary import run_topic_pair_summary
     from src.evaluation.word_based.label_profile import (
         run_word_based_label_profile,
     )
     from src.evaluation.word_based.metrics import run_word_based_metrics
+    from src.evaluation.word_based.summary import run_word_based_summary
     from src.evaluation.word_based.topic_word_table import (
         run_word_based_topic_word_table,
     )
@@ -341,12 +417,73 @@ def register_builtin_tasks() -> None:
         run_from_config_runner=_run_geometry_based_metrics_from_config,
     )
     register_task(
+        name="entropy_based_metrics",
+        description=(
+            "Entropy-based diagnostics on document-topic distributions: "
+            "topic-document entropy (MALLET document_entropy), rank-1 document "
+            "fraction, and document-topic entropy, aggregated across iterations."
+        ),
+        runner=run_entropy_based_metrics,
+        output_kind="path",
+        run_from_config_supported=True,
+        run_from_config_runner=_run_entropy_based_metrics_from_config,
+    )
+    register_task(
+        name="entropy_based_summary",
+        description=(
+            "Rebuild cross-condition entropy-based tables and histograms from "
+            "results/topic_analysis/entropy_based/latest pointers."
+        ),
+        runner=run_entropy_based_summary,
+        output_kind="path",
+    )
+    register_task(
+        name="vmf_foldin_theta",
+        description=(
+            "Collapsed fold-in document-topic distributions of vMF Sentence LDA "
+            "runs, theta_dk = (E[n_dk] + alpha_k) / (N_d + sum alpha), for the "
+            "training and held-out documents alike, written into each run "
+            "directory as doc_topic_<split>_foldin.pkl."
+        ),
+        runner=run_vmf_foldin_theta,
+        output_kind="path",
+    )
+    register_task(
+        name="topic_pair_metrics",
+        description=(
+            "All-topic-pair analysis of sentence-level models in the shared "
+            "sentence-embedding space: empirical concentration, centroid cosine, "
+            "assignment confusion, fine-label divergence and cross-model overlap, "
+            "from the collapsed fold-in posteriors, aggregated across iterations."
+        ),
+        runner=run_topic_pair_metrics,
+        output_kind="path",
+        run_from_config_supported=True,
+        run_from_config_runner=_run_topic_pair_metrics_from_config,
+    )
+    register_task(
+        name="topic_pair_summary",
+        description=(
+            "Rebuild the cross-condition topic-pair review table and the "
+            "per-(dataset, encoder, K) *.scores.json sidecars from "
+            "results/topic_analysis/topic_pairs/latest pointers."
+        ),
+        runner=run_topic_pair_summary,
+        output_kind="path",
+    )
+    register_task(
         name="word_based_metrics",
         description="Analyze topic-word metrics such as coherence and diversity across iterations.",
         runner=run_word_based_metrics,
         output_kind="path",
         run_from_config_supported=True,
         run_from_config_runner=_run_word_based_metrics_from_config,
+    )
+    register_task(
+        name="word_based_summary",
+        description="Summarize topic coherence and diversity runs for reporting.",
+        runner=run_word_based_summary,
+        output_kind="path",
     )
     register_task(
         name="sentence_topic_inspection",
@@ -361,6 +498,15 @@ def register_builtin_tasks() -> None:
         output_kind="path",
         run_from_config_supported=True,
         run_from_config_runner=_run_topic_count_diagnostics_from_config,
+    )
+    register_task(
+        name="topic_sweep_summary",
+        description=(
+            "Aggregate classification and word-based results into one table "
+            "indexed by topic count, and draw the K sweep figures."
+        ),
+        runner=run_topic_sweep_summary,
+        output_kind="path",
     )
     register_task(
         name="word_based_label_profile",

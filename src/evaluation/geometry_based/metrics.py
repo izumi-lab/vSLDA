@@ -142,7 +142,7 @@ def _effective_embedding_variant(
         return None
     variant = str(embedding_variant)
     if model == "gaussian" and not variant.endswith(("_raw", "_norm")):
-        return f"{variant}_raw"
+        return f"{variant}_norm"
     return variant
 
 

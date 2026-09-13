@@ -55,7 +55,15 @@ REQUIRED_ARTIFACT_GROUPS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("params/embeddings.pkl", "embeddings.pkl"),
     ),
     "ctm": (("params/tp.pkl", "tp.pkl"),),
+    "sam": (
+        ("params/params.json", "params.json"),
+        ("params/topic_word_scores.pkl", "topic_word_scores.pkl"),
+        ("params/vocabulary.json", "vocabulary.json"),
+        ("params/sam.pkl", "sam.pkl"),
+        ("params/idf.pkl", "idf.pkl"),
+    ),
 }
+REQUIRED_ARTIFACT_GROUPS["sam_tf"] = REQUIRED_ARTIFACT_GROUPS["sam"]
 
 
 @dataclass(frozen=True)

@@ -98,6 +98,8 @@ def resolve_topic_word_protocol(model: str) -> str:
         return "native_etm_beta_with_variational_responsibilities"
     if normalized == "ctm":
         return "native_ctm_decoder_with_token_responsibilities"
+    if normalized in {"sam", "sam_tf"}:
+        return "sam_positive_part_topics_with_document_mixture_responsibilities"
     raise ValueError(f"unsupported post-hoc topic-word model: {model!r}")
 
 
@@ -828,6 +830,111 @@ def compute_etm_expected_counts(
         "theta_samples": int(num_samples),
         "global_topic_parameters": "frozen",
     }
+
+
+def sam_positive_topic_profiles(
+    topic_directions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project signed SAM topic directions onto proper topic-word distributions.
+
+    SAM topics are unit vectors on ``S^{V-1}`` and may carry negative weight --
+    that is the model's headline claim (the paper's Table 1 pairs e.g. positive
+    ``svm`` with negative ``network``).  Word-topic NPMI, however, is defined on
+    non-negative expected counts, so the evaluation protocol uses the positive
+    part of each topic renormalized to sum to one:
+
+        beta_{t,w} = max(phi_{t,w}, 0) / sum_w' max(phi_{t,w'}, 0)
+
+    Returns ``(beta, informative)`` where ``informative`` marks the words that
+    carry positive weight under at least one topic.  Words outside that mask have
+    no positive association with any topic, so the responsibility denominator is
+    zero and they are excluded from the statistics rather than attributed by
+    document composition alone; the excluded mass is reported as coverage.
+    """
+
+    directions = np.asarray(topic_directions, dtype=np.float64)
+    if directions.ndim != 2:
+        raise ValueError("SAM topic directions must have shape (topics, vocabulary)")
+    if not np.all(np.isfinite(directions)):
+        raise ValueError("SAM topic directions must be finite")
+    norms = np.linalg.norm(directions, axis=1)
+    if not np.allclose(norms, 1.0, atol=1e-6):
+        raise ValueError(
+            "SAM topic directions must be unit vectors; got norms in "
+            f"[{norms.min()!r}, {norms.max()!r}]"
+        )
+
+    positive = np.clip(directions, 0.0, None)
+    mass = positive.sum(axis=1)
+    degenerate = np.flatnonzero(mass <= 0.0)
+    if degenerate.size:
+        raise ValueError(
+            "SAM topic directions with no positive weight cannot be projected onto "
+            f"a topic-word distribution: topics {degenerate.tolist()}"
+        )
+    beta = positive / mass[:, None]
+    informative = beta.sum(axis=0) > 0.0
+    return beta, informative
+
+
+def compute_sam_expected_counts(
+    *,
+    doc_topic: np.ndarray,
+    topic_directions: np.ndarray,
+    corpus_bow: Sequence[Sequence[tuple[int, int]]],
+) -> tuple[TopicWordStatistics, dict[str, object]]:
+    """SAM token responsibilities under the positive-part protocol.
+
+    Delegates to :func:`compute_etm_expected_counts` once the signed topic
+    directions have been projected, so SAM lands on exactly the same protocol as
+    ETM and CTM -- including the token-mass conservation check -- rather than a
+    parallel one.
+
+    The approximation is deliberate and worth stating when reading the resulting
+    numbers: SAM's generative story has no per-token topic indicator (the whole
+    document vector is one draw from ``vMF(Avg(phi, theta_d), kappa)``), and the
+    positive-part projection discards exactly the negative weights that SAM
+    claims as its advantage.  The resulting NPMI is therefore a conservative
+    reading, and ``positive_mass_fraction_by_topic`` records how much of each
+    topic's L1 mass survived.
+    """
+
+    beta, informative = sam_positive_topic_profiles(topic_directions)
+    filtered_bow = [
+        [
+            (int(word_id), int(count))
+            for word_id, count in bow
+            if 0 <= int(word_id) < informative.size and informative[int(word_id)]
+        ]
+        for bow in corpus_bow
+    ]
+    statistics, metadata = compute_etm_expected_counts(
+        theta_samples=np.asarray(doc_topic, dtype=np.float64),
+        beta=beta,
+        corpus_bow=filtered_bow,
+    )
+
+    directions = np.asarray(topic_directions, dtype=np.float64)
+    absolute = np.abs(directions).sum(axis=1)
+    positive_fraction = np.where(
+        absolute > 0.0, np.clip(directions, 0.0, None).sum(axis=1) / absolute, 0.0
+    )
+    observed = sum(int(count) for bow in corpus_bow for _, count in bow)
+    retained = sum(int(count) for bow in filtered_bow for _, count in bow)
+    metadata.update(
+        {
+            "posterior_kind": "sam_positive_part_document_mixture_responsibility",
+            "positive_mass_fraction_by_topic": [
+                float(value) for value in positive_fraction
+            ],
+            "informative_word_count": int(np.count_nonzero(informative)),
+            "vocabulary_size": int(informative.size),
+            "retained_token_fraction": (
+                float(retained) / float(observed) if observed else 0.0
+            ),
+        }
+    )
+    return statistics, metadata
 
 
 def build_topic_words_artifact(

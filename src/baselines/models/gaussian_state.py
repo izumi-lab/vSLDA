@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Protocol
 
 import numpy as np
@@ -31,6 +31,8 @@ class GaussianTrainerLike(Protocol):
     table_counts_per_doc: Any
     training_corpus_preencoded: Any
     training_corpus_encoding_sec: Any
+    iteration_diagnostics: Any
+    training_elapsed_sec: Any
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,17 @@ class GaussianTrainerState:
     training_corpus_encoding_sec: float | None = None
     prior_scale: float | None = None
     prior_nu: float | None = None
+    iteration_diagnostics: tuple[dict[str, Any], ...] = ()
+    training_elapsed_sec: float | None = None
+    # Reduced-covariance (diag / spherical) sentence Gaussian LDA only. ``None`` for the
+    # full-covariance trainers, whose artifacts are unchanged.
+    covariance_type: str | None = None
+    sum_squared_table_customers_diag: Any | None = None
+    table_scaled_variances: Any | None = None
+
+
+def is_reduced_covariance_state(trainer_state: "GaussianTrainerState") -> bool:
+    return trainer_state.covariance_type in {"diag", "spherical"}
 
 
 def validate_gaussian_trainer_state(
@@ -71,9 +84,19 @@ def validate_gaussian_trainer_state(
         "table_means": trainer_state.table_means,
         "log_determinants": trainer_state.log_determinants,
         "sum_table_customers": trainer_state.sum_table_customers,
-        "sum_squared_table_customers": trainer_state.sum_squared_table_customers,
-        "table_cholesky_ltriangular_mat": trainer_state.table_cholesky_ltriangular_mat,
     }
+    if is_reduced_covariance_state(trainer_state):
+        fields_to_check["sum_squared_table_customers_diag"] = (
+            trainer_state.sum_squared_table_customers_diag
+        )
+        fields_to_check["table_scaled_variances"] = trainer_state.table_scaled_variances
+    else:
+        fields_to_check["sum_squared_table_customers"] = (
+            trainer_state.sum_squared_table_customers
+        )
+        fields_to_check["table_cholesky_ltriangular_mat"] = (
+            trainer_state.table_cholesky_ltriangular_mat
+        )
     for field_name, value in fields_to_check.items():
         if _shape(value)[0] != expected_num_tables:
             raise ValueError(
@@ -133,12 +156,36 @@ def snapshot_gaussian_trainer(
             if getattr(trainer.prior, "scale_sigma", None) is None
             else float(getattr(trainer.prior, "scale_sigma"))
         ),
-        prior_nu=(
-            None
-            if getattr(trainer.prior, "nu", None) is None
-            else float(getattr(trainer.prior, "nu"))
+        prior_nu=_trainer_prior_nu(trainer),
+        iteration_diagnostics=tuple(
+            asdict(item) if is_dataclass(item) else dict(item)
+            for item in getattr(trainer, "iteration_diagnostics", ()) or ()
         ),
+        training_elapsed_sec=(
+            None
+            if getattr(trainer, "training_elapsed_sec", None) is None
+            else float(getattr(trainer, "training_elapsed_sec"))
+        ),
+        covariance_type=(
+            None
+            if getattr(trainer, "covariance_type", None) is None
+            else str(getattr(trainer, "covariance_type"))
+        ),
+        sum_squared_table_customers_diag=getattr(
+            trainer, "sum_squared_table_customers_diag", None
+        ),
+        table_scaled_variances=getattr(trainer, "table_scaled_variances", None),
     )
+
+
+def _trainer_prior_nu(trainer: GaussianTrainerLike) -> float | None:
+    # The reduced-covariance trainer keeps its own (smaller) prior degrees of freedom; the
+    # full-covariance trainers report the prior's ``nu`` (= M).
+    own = getattr(trainer, "prior_nu", None)
+    if own is not None:
+        return float(own)
+    value = getattr(trainer.prior, "nu", None)
+    return None if value is None else float(value)
 
 
 def coerce_gaussian_trainer_state(

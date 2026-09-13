@@ -62,12 +62,16 @@ def build_vmf_display_key(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
 ) -> str:
+    # ``parameter_variant`` is the hyperparameter label of src.core.vmf_variant; the default
+    # run carries none, so its key is unchanged.
     return _build_component_display_key(
         iteration=iteration,
         num_topics=num_topics,
         num_components=num_components,
         embedding_variant=embedding_variant,
+        parameter_variant=parameter_variant,
     )
 
 
@@ -108,6 +112,7 @@ def build_vmf_latest_dir(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     run_name: str = "default",
     dataset_root: Path | None = None,
 ) -> Path:
@@ -120,6 +125,7 @@ def build_vmf_latest_dir(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         )
     )
 
@@ -131,6 +137,7 @@ def build_vmf_archive_dir(
     num_topics: int,
     num_components: int | None = None,
     embedding_variant: str | None = None,
+    parameter_variant: str | None = None,
     started_at: str | None = None,
     execution_id: str | None = None,
     run_name: str = "default",
@@ -147,6 +154,7 @@ def build_vmf_archive_dir(
             num_topics=num_topics,
             num_components=num_components,
             embedding_variant=embedding_variant,
+            parameter_variant=parameter_variant,
         )
         / resolved_execution_id
     )

@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Optional, Sequence
 from src.baselines.params import BaselineParams
 from src.utils.random import DEFAULT_RANDOM_SEED
 
+# Defaults of the vMF Sentence LDA estimation (SAEM with the exact kappa root since
+# 2026-09-11). ``saem_burn_in: null`` in the YAML restores the plain MCEM.
+DEFAULT_SAEM_BURN_IN = 5
+DEFAULT_SAEM_DECAY = 1.0
+DEFAULT_KAPPA_SOLVER = "newton"
+
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -38,6 +44,18 @@ class TrainConfig:
     min_topic_count_for_repair: int = 1
     avg_log_likelihood_every: int = 1
     invariant_check_every: int = 1
+    # SAEM variant of the MCEM (Kuhn & Lavielle 2004): after ``saem_burn_in`` outer iterations
+    # the E-step statistics are averaged with step size (t - burn_in)^-saem_decay and alpha is
+    # frozen. The SAEM is the default; None (``saem_burn_in: null``) keeps the plain MCEM.
+    # ``kappa_solver`` "newton" solves A_M(kappa) = rbar exactly from the Banerjee value;
+    # "banerjee" keeps the approximation.
+    saem_burn_in: int | None = DEFAULT_SAEM_BURN_IN
+    saem_decay: float = DEFAULT_SAEM_DECAY
+    kappa_solver: str = DEFAULT_KAPPA_SOLVER
+    # Keys of src.core.vmf_variant.VMF_HYPERPARAMETER_KEYS that ``experiments run`` overrode
+    # to a value different from the YAML; they label the vMF result path (see
+    # ``format_vmf_parameter_variant``). Empty for every run driven by the YAML alone.
+    hyperparameter_overrides: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,6 +131,11 @@ class RuntimeConfig:
 @dataclass(frozen=True)
 class VmfInferenceConfig:
     soft_temperature: float = 1.0
+    # Write the collapsed fold-in document-topic distributions of the training and test
+    # documents (doc_topic_<split>_foldin*.pkl) at the end of training, so that the
+    # default estimator of the evaluation commands (foldincounts) is available for
+    # every run without `evaluation vmf-foldin-theta`.
+    foldin: bool = True
 
 
 @dataclass(frozen=True)

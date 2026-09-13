@@ -67,6 +67,8 @@ def test_build_feature_specs_includes_expected_models() -> None:
     assert [spec.display_name for spec in specs] == [
         "Contextual TM",
         "Blei LDA",
+        "SAM",
+        "SAM (tf-idf)",
         "BERTopic (UMAP + k-means)",
         "Gaussian LDA",
         "ETM",
@@ -86,6 +88,8 @@ def test_feature_registry_exposes_builtin_model_keys() -> None:
     assert list(FEATURE_REGISTRY.keys()) == [
         "ctm",
         "bleilda",
+        "sam_tf",
+        "sam",
         "bertopic_kmeans",
         "gaussianlda",
         "etm",
@@ -235,6 +239,62 @@ def test_iter_available_features_resolves_vmf_soft_paths(
     assert ctm_spec.model_key == "ctm"
     assert ctm_train_path.name == "ctm.pkl"
     assert ctm_test_path.name == "science.pkl"
+
+
+def test_iter_available_features_resolves_vmf_foldin_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.core.paths.EXPERIMENT_RESULTS_ROOT",
+        tmp_path / "experiments",
+    )
+    monkeypatch.setattr(
+        "src.core.paths.BASELINE_RESULTS_ROOT",
+        tmp_path / "baselines",
+    )
+    specs = iter_available_features(
+        dataset="20newsgroup",
+        iteration=2,
+        num_topics=30,
+        category="science",
+        vmf_assignment="foldin",
+    )
+
+    vmf_spec, vmf_train_path, vmf_test_path = next(
+        item for item in specs if item[0].model_key == "vmf_sentence_lda"
+    )
+    assert vmf_spec.display_name == "vMF Sentence LDA (fold-in)"
+    assert vmf_train_path.name == "doc_topic_train_foldin.pkl"
+    assert vmf_test_path.name == "doc_topic_test_foldin.pkl"
+
+
+def test_iter_available_features_resolves_vmf_foldincounts_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.core.paths.EXPERIMENT_RESULTS_ROOT",
+        tmp_path / "experiments",
+    )
+    monkeypatch.setattr(
+        "src.core.paths.BASELINE_RESULTS_ROOT",
+        tmp_path / "baselines",
+    )
+    specs = iter_available_features(
+        dataset="20newsgroup",
+        iteration=2,
+        num_topics=30,
+        category="science",
+        vmf_assignment="foldincounts",
+    )
+
+    vmf_spec, vmf_train_path, vmf_test_path = next(
+        item for item in specs if item[0].model_key == "vmf_sentence_lda"
+    )
+    assert vmf_spec.display_name == "vMF Sentence LDA (fold-in counts)"
+    assert vmf_train_path.name == "doc_topic_train_foldin_counts.pkl"
+    assert vmf_test_path.name == "doc_topic_test_foldin_counts.pkl"
 
 
 def test_iter_available_features_reads_all_matching_latest_baseline_variants(
@@ -588,6 +648,65 @@ def test_iter_available_features_matches_raw_sentence_embedding_variant(
     ]
 
 
+def test_unfiltered_gslda_features_prefer_the_normalized_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Requesting no variant matches raw and norm alike, which used to yield two
+    # "Sentence LDA" columns - the collision the raw/norm preference exists for.
+    root = tmp_path / "results"
+    baseline_root = root / "baselines"
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", baseline_root)
+    monkeypatch.setattr("src.core.paths.EXPERIMENT_RESULTS_ROOT", root / "experiments")
+
+    for variant in ("mpnet_raw", "mpnet_norm"):
+        display_key = f"k2_it0_{variant}"
+        model_root = baseline_root / "dummy" / "default" / "sentence_gaussianlda"
+        _write_latest_pointer_case(
+            archive_dir=(
+                model_root
+                / "archive"
+                / "2026-01-01"
+                / "science"
+                / display_key
+                / f"baseline_{variant}"
+            ),
+            latest_dir=model_root / "latest" / "science" / display_key,
+            metadata={
+                "runner_key": "sentence_gaussianlda",
+                "runner_family": "sentence_gaussianlda",
+                "dataset": "dummy",
+                "data_run": "default",
+                "category": "science",
+                "num_topics": 2,
+                "iteration": 0,
+                "embedding_variant": variant,
+            },
+            artifacts={
+                "train_path": "params/table_counts_per_doc.pkl",
+                "infer_path": "infer/science.pkl",
+            },
+            display_key=display_key,
+            embedding_variant=variant,
+        )
+
+    specs = iter_available_features(
+        dataset="dummy",
+        data_run="default",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        vmf_assignment="hard",
+    )
+    sentence_specs = [
+        item for item in specs if item[0].model_key == "sentence_gaussianlda"
+    ]
+
+    assert [spec.display_name for spec, _train, _test in sentence_specs] == [
+        "Sentence LDA [mpnet_norm]"
+    ]
+
+
 def test_iter_available_features_reads_latest_vmf_soft_artifacts(
     tmp_path: Path,
     monkeypatch,
@@ -657,6 +776,92 @@ def test_iter_available_features_reads_latest_vmf_soft_artifacts(
     assert vmf_spec.display_name == "vMF Sentence LDA (soft) [c1_mpnet]"
     assert train_path.name == "doc_topic_train_soft.pkl"
     assert test_path.name == "doc_topic_test_soft.pkl"
+
+
+@pytest.mark.parametrize("with_pointer_keys", [True, False])
+def test_iter_available_features_reads_latest_vmf_foldin_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+    with_pointer_keys: bool,
+) -> None:
+    """The fold-in files are found through the pointer keys or, for pointers
+    written before ``vmf-foldin-theta`` existed, by their file names."""
+
+    root = tmp_path / "results"
+    experiment_root = root / "experiments"
+    monkeypatch.setattr("src.core.paths.EXPERIMENT_RESULTS_ROOT", experiment_root)
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", root / "baselines")
+
+    display_key = "k2_it0_c1_mpnet"
+    archive_dir = (
+        experiment_root
+        / "dummy"
+        / "default"
+        / "vmf_sentence_lda"
+        / "archive"
+        / "2026-01-01"
+        / "science"
+        / display_key
+        / "vmf_mpnet"
+    )
+    artifacts = {
+        "train_path": "doc_topic_train.pkl",
+        "infer_path": "doc_topic_test.pkl",
+    }
+    if with_pointer_keys:
+        artifacts.update(
+            {
+                "train_doc_topic_foldin": "doc_topic_train_foldin.pkl",
+                "test_doc_topic_foldin": "doc_topic_test_foldin.pkl",
+            }
+        )
+    _write_latest_pointer_case(
+        archive_dir=archive_dir,
+        latest_dir=(
+            experiment_root
+            / "dummy"
+            / "default"
+            / "vmf_sentence_lda"
+            / "latest"
+            / "science"
+            / display_key
+        ),
+        metadata={
+            "axes": {
+                "dataset": "dummy",
+                "data_run": "default",
+                "category": "science",
+                "num_topics": 2,
+                "iteration": 0,
+                "model_family": "vmf_sentence_lda",
+                "embedding_variant": "mpnet",
+            },
+            "condition_fingerprint": "fingerprint-vmf",
+            "encoder_config": {"embedding_variant": "mpnet"},
+        },
+        artifacts=artifacts,
+        display_key=display_key,
+        embedding_variant="mpnet",
+    )
+    if not with_pointer_keys:
+        for name in ("doc_topic_train_foldin.pkl", "doc_topic_test_foldin.pkl"):
+            (archive_dir / name).write_bytes(b"x")
+
+    specs = iter_available_features(
+        dataset="dummy",
+        data_run="default",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        vmf_assignment="foldin",
+    )
+    vmf_spec, train_path, test_path = next(
+        item for item in specs if item[0].model_key == "vmf_sentence_lda"
+    )
+
+    assert vmf_spec.display_name == "vMF Sentence LDA (fold-in) [c1_mpnet]"
+    assert train_path == archive_dir / "doc_topic_train_foldin.pkl"
+    assert test_path == archive_dir / "doc_topic_test_foldin.pkl"
 
 
 def test_load_pickle_array_raises_missing_artifact_error(tmp_path: Path) -> None:
@@ -924,3 +1129,274 @@ def test_selection_alignment_reports_missing_raw_doc_indices(tmp_path: Path) -> 
         _selection_alignment_from_artifacts(
             train_dir / "doc_topic.pkl", infer_dir / "doc_topic.pkl"
         )
+
+
+def test_pointer_variant_values_include_the_encoder_model_name() -> None:
+    """A pointer matches a request by encoder model name as well as by variant slug."""
+    from src.evaluation.classification import feature_registry as fr
+
+    payload = {
+        "display_key": "k30_it3_c1_minilm",
+        "embedding_variant": "minilm",
+        "encoder_config": {
+            "model_name": "all-MiniLM-L6-v2",
+            "embedding_variant": "minilm",
+        },
+    }
+    values = fr._pointer_variant_values(
+        pointer_payload=payload, metadata={}, iteration=3, num_topics=30
+    )
+    assert {"minilm", "c1_minilm", "all-MiniLM-L6-v2"} <= values
+    for requested in ("minilm", "all-MiniLM-L6-v2"):
+        assert fr._variant_matches(
+            model_key="vmf_sentence_lda",
+            pointer_payload=payload,
+            metadata={},
+            iteration=3,
+            num_topics=30,
+            embedding_variants=[requested],
+        )
+    assert not fr._variant_matches(
+        model_key="vmf_sentence_lda",
+        pointer_payload=payload,
+        metadata={},
+        iteration=3,
+        num_topics=30,
+        embedding_variants=["all-mpnet-base-v2"],
+    )
+
+
+def test_pointer_parameter_variant_reaches_the_feature_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A swept vMF run whose archive metadata lacks parameter_variant keeps the pointer's."""
+    import json
+
+    from src.evaluation.classification import feature_registry as fr
+
+    root = tmp_path / "experiments"
+    monkeypatch.setattr("src.core.paths.EXPERIMENT_RESULTS_ROOT", root)
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", tmp_path / "baselines")
+    archive = (
+        root
+        / "20newsgroup/default/vmf_sentence_lda/archive/2026-09-05/computer/k20_it0_c1_minilm_alpha0-1/vmf_x"
+    )
+    archive.mkdir(parents=True)
+    for name in (
+        "doc_topic_train_foldin_counts.pkl",
+        "doc_topic_test_foldin_counts.pkl",
+    ):
+        (archive / name).write_bytes(b"")
+    (archive / "metadata.json").write_text(
+        json.dumps(
+            {
+                "parameter_variant": None,
+                "axes": {
+                    "dataset": "20newsgroup",
+                    "category": "computer",
+                    "num_topics": 20,
+                    "iteration": 0,
+                    "model_family": "vmf_sentence_lda",
+                    "embedding_variant": "minilm",
+                },
+                "hyperparameters": {"alpha_init": 1.0},
+            }
+        )
+    )
+    latest = (
+        root
+        / "20newsgroup/default/vmf_sentence_lda/latest/computer/k20_it0_c1_minilm_alpha0-1"
+    )
+    latest.mkdir(parents=True)
+    (latest / "CURRENT.json").write_text(
+        json.dumps(
+            {
+                "schema": "latest_result_pointer",
+                "task": "vmf_experiment",
+                "display_key": "k20_it0_c1_minilm_alpha0-1",
+                "dataset": "20newsgroup",
+                "data_run": "default",
+                "category": "computer",
+                "archive_dir": str(archive),
+                "embedding_variant": "minilm",
+                "parameter_variant": "alpha0-1",
+                "encoder_config": {
+                    "model_name": "all-MiniLM-L6-v2",
+                    "embedding_variant": "minilm",
+                },
+                "artifacts": {
+                    "train_doc_topic_foldin_counts": "doc_topic_train_foldin_counts.pkl",
+                    "test_doc_topic_foldin_counts": "doc_topic_test_foldin_counts.pkl",
+                },
+            }
+        )
+    )
+    specs = fr.iter_available_features(
+        dataset="20newsgroup",
+        iteration=0,
+        num_topics=20,
+        category="computer",
+        vmf_assignment="foldincounts",
+        feature_resolve_mode="strict",
+        selected_models=["vmf_sentence_lda"],
+        embedding_variants=["all-MiniLM-L6-v2"],
+        vmf_variant="alpha0-1",
+    )
+    assert len(specs) == 1
+    spec = specs[0][0]
+    provenance = (
+        fr.feature_provenance(spec) if hasattr(fr, "feature_provenance") else None
+    )
+    metadata = getattr(spec, "metadata", None) or {}
+    assert (provenance or {}).get(
+        "vmf_variant", metadata.get("parameter_variant")
+    ) == "alpha0-1"
+
+
+@pytest.mark.parametrize("with_pointer_keys", [True, False])
+def test_iter_available_features_resolves_mvtm_foldincounts_paths(
+    tmp_path: Path,
+    monkeypatch,
+    with_pointer_keys: bool,
+) -> None:
+    """MvTM shares the vMF estimators: under ``foldincounts`` its features are the
+    token-unit fold-in counts under ``params/`` and ``infer/`` (through the pointer
+    keys or, for older pointers, by their file names); ``hard`` keeps the historical
+    files."""
+
+    root = tmp_path / "results"
+    baseline_root = root / "baselines"
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", baseline_root)
+    monkeypatch.setattr("src.core.paths.EXPERIMENT_RESULTS_ROOT", root / "experiments")
+
+    display_key = "k2_it0_c1_googlenews300"
+    archive_dir = (
+        baseline_root
+        / "dummy"
+        / "default"
+        / "mvtm"
+        / "archive"
+        / "2026-01-01"
+        / "science"
+        / display_key
+        / "baseline_exec"
+    )
+    artifacts = {
+        "train_path": "params/table_counts_per_doc.pkl",
+        "infer_path": "infer/science.pkl",
+        "train_doc_topic_soft": "params/doc_topic_train_soft.pkl",
+        "test_doc_topic_soft": "infer/science_doc_topic_soft.pkl",
+    }
+    foldin_files = {
+        "train_doc_topic_foldin_counts": "params/science_doc_topic_foldin_counts.pkl",
+        "test_doc_topic_foldin_counts": "infer/science_doc_topic_foldin_counts.pkl",
+    }
+    if with_pointer_keys:
+        artifacts.update(foldin_files)
+    _write_latest_pointer_case(
+        archive_dir=archive_dir,
+        latest_dir=(
+            baseline_root
+            / "dummy"
+            / "default"
+            / "mvtm"
+            / "latest"
+            / "science"
+            / display_key
+        ),
+        metadata={
+            "runner_key": "mvtm",
+            "runner_family": "mvtm",
+            "dataset": "dummy",
+            "data_run": "default",
+            "category": "science",
+            "num_topics": 2,
+            "iteration": 0,
+            "embedding_variant": "googlenews300",
+            "condition_fingerprint": "fingerprint-mvtm",
+        },
+        artifacts=artifacts,
+        display_key=display_key,
+        embedding_variant="googlenews300",
+    )
+    if not with_pointer_keys:
+        for relative in foldin_files.values():
+            (archive_dir / relative).write_bytes(b"x")
+
+    def _mvtm_paths(vmf_assignment: str) -> tuple[Path, Path]:
+        specs = iter_available_features(
+            dataset="dummy",
+            data_run="default",
+            iteration=0,
+            num_topics=2,
+            category="science",
+            vmf_assignment=vmf_assignment,
+        )
+        spec, train_path, test_path = next(
+            item for item in specs if item[0].model_key == "mvtm"
+        )
+        assert spec.display_name == "MvTM [c1_googlenews300]"
+        return train_path, test_path
+
+    train_path, test_path = _mvtm_paths("foldincounts")
+    assert train_path == archive_dir / "params" / "science_doc_topic_foldin_counts.pkl"
+    assert test_path == archive_dir / "infer" / "science_doc_topic_foldin_counts.pkl"
+    train_path, test_path = _mvtm_paths("hard")
+    assert train_path == archive_dir / "params" / "table_counts_per_doc.pkl"
+    assert test_path == archive_dir / "infer" / "science.pkl"
+    train_path, test_path = _mvtm_paths("soft")
+    assert train_path == archive_dir / "params" / "doc_topic_train_soft.pkl"
+    assert test_path == archive_dir / "infer" / "science_doc_topic_soft.pkl"
+
+
+def test_mvtm_feature_spec_resolves_fold_in_paths_without_a_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The axis-based resolver (no latest pointer) names the fold-in files too."""
+
+    from src.core.path_resolution import build_baseline_doc_topic_path
+
+    baseline_root = tmp_path / "baselines"
+    monkeypatch.setattr("src.core.paths.BASELINE_RESULTS_ROOT", baseline_root)
+    path = build_baseline_doc_topic_path(
+        model="mvtm",
+        dataset="dummy",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        split="test",
+        condition_id="it0__k2__abc",
+        assignment="foldincounts",
+        baseline_root=baseline_root,
+    )
+    assert path is not None
+    assert path.name == "science_doc_topic_foldin_counts.pkl"
+    assert path.parent.name == "infer"
+    train = build_baseline_doc_topic_path(
+        model="mvtm",
+        dataset="dummy",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        split="train",
+        condition_id="it0__k2__abc",
+        assignment="foldin",
+        baseline_root=baseline_root,
+    )
+    assert train is not None
+    assert (
+        train.parent.name == "params" and train.name == "science_doc_topic_foldin.pkl"
+    )
+    # Other baselines ignore the estimator.
+    etm = build_baseline_doc_topic_path(
+        model="etm",
+        dataset="dummy",
+        iteration=0,
+        num_topics=2,
+        category="science",
+        split="test",
+        condition_id="it0__k2__abc",
+        assignment="foldincounts",
+        baseline_root=baseline_root,
+    )
+    assert etm is not None and etm.name == "science.pkl"

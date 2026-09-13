@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import gensim
 import numpy as np
@@ -316,6 +317,76 @@ def _params_payload(
     return payload
 
 
+def _write_training_foldin(
+    *,
+    train_result: MvTMTrainResult,
+    infer_result: MvTMInferResult,
+    train_dir: Path,
+    infer_dir: Path,
+    category: str,
+    condition_fingerprint: str | None,
+    dataset: str | None,
+    data_run: str,
+    foldin_config: Any = None,
+) -> dict[str, Path]:
+    """Write the collapsed fold-in theta of both splits (the vMF Sentence LDA
+    estimator, over word tokens) next to the run's other artifacts.
+
+    The token log likelihoods come from the trainer's fitted mixtures and the
+    word vectors it observed, through the same functions and fingerprint as
+    ``evaluation vmf-foldin-theta --model mvtm`` (:mod:`src.evaluation.foldin.mvtm`),
+    so the post-hoc command recognizes these artifacts as current and skips the run.
+    Returns the pointer artifact keys with their absolute paths.
+    """
+
+    from src.evaluation.foldin.artifacts import (
+        word_vector_fingerprint,
+        write_foldin_artifacts,
+    )
+    from src.evaluation.foldin.mvtm import compute_mvtm_foldin
+
+    condition_dir = Path(train_dir).parent
+    if Path(infer_dir).parent != condition_dir:
+        raise ValueError(
+            f"train_dir {train_dir} and infer_dir {infer_dir} must share a run directory"
+        )
+    trainer = train_result.trainer
+    params = train_result.params
+    word2vec_name = str(params.word2vec)
+    encoder_fp = word_vector_fingerprint(
+        word2vec_name, wikientvec_cache_dir=params.wikientvec_cache_dir
+    )
+    alpha = np.asarray(trainer.alpha, dtype=np.float64)
+    artifacts: dict[str, Path] = {}
+    for split, documents in (
+        ("train", train_result.train_preprocessed),
+        ("test", infer_result.test_preprocessed),
+    ):
+        started = time.perf_counter()
+        result = compute_mvtm_foldin(
+            documents=documents,
+            vectors=train_result.word_vectors,
+            mixture_weights=trainer.mixture_weights,
+            component_means=trainer.component_means,
+            kappa_per_topic=trainer.kappa_per_topic,
+            alpha=alpha,
+            split=split,
+            dataset=str(dataset or ""),
+            data_run=str(data_run),
+            category=category,
+            encoder_fp=encoder_fp,
+            condition_fp=condition_fingerprint or "",
+            word2vec_name=word2vec_name,
+            foldin_config=foldin_config,
+            extra_metadata={"written_by": "training"},
+            timing={"load_corpus_sec": 0.0, "encode_sec": 0.0},
+        )
+        result.timing["total_sec"] = time.perf_counter() - started
+        written = write_foldin_artifacts(condition_dir, result=result)
+        artifacts.update({key: condition_dir / name for key, name in written.items()})
+    return artifacts
+
+
 def persist_mvtm_run(
     *,
     train_result: MvTMTrainResult,
@@ -323,7 +394,15 @@ def persist_mvtm_run(
     train_dir: Path,
     infer_dir: Path,
     category: str,
+    foldin: bool = True,
+    condition_fingerprint: str | None = None,
+    dataset: str | None = None,
+    data_run: str = "default",
 ) -> BaselineArtifacts:
+    """Persist the run; with ``foldin`` (the default) the collapsed fold-in theta of
+    both splits is written as well (``params/<category>_doc_topic_foldin*.pkl``,
+    ``infer/<category>_doc_topic_foldin*.pkl``, ``foldin_meta.json``)."""
+
     trainer = train_result.trainer
     params_path = train_dir / "params.json"
     save_json(_params_payload(train_result=train_result), params_path)
@@ -464,6 +543,19 @@ def persist_mvtm_run(
         kv_path = train_dir / "local_word2vec.kv"
         train_result.local_word_vectors.save(kv_path.as_posix())
         extras["local_word2vec"] = kv_path
+    if foldin:
+        extras.update(
+            _write_training_foldin(
+                train_result=train_result,
+                infer_result=infer_result,
+                train_dir=train_dir,
+                infer_dir=infer_dir,
+                category=category,
+                condition_fingerprint=condition_fingerprint,
+                dataset=dataset,
+                data_run=data_run,
+            )
+        )
     return BaselineArtifacts(
         train_path=saved["train_path"],
         infer_path=saved["infer_path"],

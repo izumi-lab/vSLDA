@@ -406,3 +406,148 @@ def test_collection_persists_partial_words_and_excludes_metrics(
     display = json.loads(display_path.read_text(encoding="utf-8"))
     assert display["_meta"]["metrics_status"] == "excluded"
     assert display["results"]["per_iteration"][0]["topics"][1]["words"] == []
+
+
+def test_collection_keeps_mvtm_empty_topics_under_fixed_k_policy(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dictionary = Dictionary([["alpha", "beta"]])
+    runtime = replace(
+        _runtime(words=[[("alpha", 1.0)], []]),
+        empty_topic_ids=(1,),
+    )
+    args = SimpleNamespace(
+        dataset="dummy",
+        iteration=[0],
+        coherence_split="train",
+        coherence_min_token_len=1,
+        language="english",
+        delimiter=" / ",
+        ja_replace_num=True,
+        ja_dicdir=None,
+        ja_require_unidic=True,
+        dict_no_below=1,
+        dict_no_above=1.0,
+        dict_exclude_tokens=frozenset(),
+        dict_exclude_single_alpha=False,
+        dict_exclude_with_digit=False,
+        dict_exclude_hiragana_only=False,
+        checkpoint_mode="off",
+        checkpoint_root=None,
+        out_root=tmp_path,
+        condition_failure_policy="exclude-condition",
+        mvtm_empty_topic_policy="fixed-k",
+        embedding_variant="minilm",
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "_resolve_split_csvs_and_target_column",
+        lambda **_kwargs: (None, "target_str"),
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "_get_corpus_bundle_cached",
+        lambda **_kwargs: ([["alpha", "beta"]], dictionary, [[(0, 1), (1, 1)]]),
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "_topic_word_checkpoint_identity",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "topic_word_checkpoint_dir",
+        lambda **_kwargs: tmp_path / "checkpoint",
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "_resolve_topic_words_result",
+        lambda **_kwargs: (
+            TopicWordsResult(
+                topic_words=runtime.display_topic_words,
+                topic_word_source=runtime.display_source,
+                score_mode=runtime.display_score_mode,
+                score_definition="test",
+                runtime_payload=runtime,
+            ),
+            [["alpha", "beta"]],
+            dictionary,
+            [[(0, 1), (1, 1)]],
+        ),
+    )
+    failures: list[dict[str, object]] = []
+
+    group = metrics_module._collect_pending_word_based_group(
+        args=args,
+        task=metrics_module.PendingWordBasedGroupTask(
+            sort_index=0,
+            data_run="default",
+            model="mvtm",
+            num_topics=2,
+            category="all",
+            progress_start=0,
+        ),
+        total_conditions=1,
+        failure_sink=failures,
+    )
+
+    assert group is not None
+    assert [item.iteration for item in group.iterations] == [0]
+    assert group.iterations[0].topic_words == [[("alpha", 1.0)], []]
+    assert failures == []
+
+
+def test_shared_reference_scoring_applies_mvtm_fixed_k_policy(monkeypatch) -> None:
+    runtime = replace(
+        _runtime(words=[[("alpha", 1.0)], []]),
+        empty_topic_ids=(1,),
+    )
+    group = metrics_module.PendingWordBasedGroup(
+        data_run="default",
+        model="mvtm",
+        num_topics=2,
+        category="all",
+        iterations=[
+            metrics_module.PendingWordBasedIteration(
+                iteration=0,
+                topic_words=runtime.display_topic_words,
+                runtime_payload=runtime,
+            )
+        ],
+        topic_word_source=runtime.display_source,
+        topic_word_score_mode=runtime.display_score_mode,
+        topic_word_score_definition="test",
+    )
+
+    def score(**kwargs):
+        assert kwargs["topic_words"] == [[("alpha", 1.0)]]
+        assert kwargs["metric_names"] == ["coherence", "diversity"]
+        return {"coherence": 0.6, "diversity": 1.0}
+
+    monkeypatch.setattr(
+        metrics_module,
+        "compute_shared_reference_coherence_scores",
+        score,
+    )
+    args = SimpleNamespace(
+        mvtm_empty_topic_policy="fixed-k",
+        coherence_topn=1,
+        diversity_topn=1,
+        coherence_window_size=None,
+        coherence_min_window_count=None,
+    )
+
+    scored = metrics_module._score_pending_word_based_group(
+        group=group,
+        args=args,
+        metric_names=metrics_module._fixed_k_metric_names(["c_v"]),
+        coherences=["c_v"],
+        shared_counts=object(),
+    )
+
+    metrics = scored.per_iter_metrics[0]
+    assert metrics["coherence"] == 0.3
+    assert metrics["coherence_active_only"] == 0.6
+    assert metrics["diversity"] == 0.5
+    assert metrics["topic_utilization"] == 0.5

@@ -49,6 +49,12 @@ from src.baselines.models.gaussian_numerics import (
     log_multivariate_tdensity_tables,
     sample_topic_assignment,
 )
+from src.baselines.models.gaussian_reduced_numerics import (
+    ReducedCovarianceTables,
+    is_reduced_covariance,
+    normalize_covariance_type,
+    reduced_prior_nu,
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,7 @@ class GaussianLDATrainer:
         num_words_for_formatting=None,
         preencode_corpus=True,
         prior_scale=0.1,
+        covariance_type="full",
     ):
         """
         :param corpus:
@@ -88,6 +95,9 @@ class GaussianLDATrainer:
             every word in the vocabulary under that topic. This can take a long time for a large vocabulary.
             If given, this limits the number considered to the first
             N in the vocabulary (which makes sense if the vocabulary is ordered with most common words first).
+        :param covariance_type: ``full`` (normal--inverse-Wishart, the reference model), ``diag``
+            or ``spherical`` (see ``gaussian_reduced_numerics``). The full path is untouched by
+            the reduced variants.
         """
         if log is None:
             log = get_logger("GLDA")
@@ -96,6 +106,9 @@ class GaussianLDATrainer:
         self.cholesky_decomp = cholesky_decomp
         self.save_path = save_path
         self.preencode_corpus = bool(preencode_corpus)
+        self.covariance_type = normalize_covariance_type(covariance_type)
+        self._reduced: ReducedCovarianceTables | None = None
+        reduced = is_reduced_covariance(self.covariance_type)
 
         # Dirichlet hyperparam
         self.alpha = alpha
@@ -130,9 +143,13 @@ class GaussianLDATrainer:
         # inverse of covariance matrix associated with each table in the current iteration.
         # The covariance matrix is scaled before taking the inverse by \frac{k_N + 1}{k_N (v_N - D + 1)}
         # (This is because the t-distribution take the matrix scaled as input)
-        self.table_inverse_covariances = np.zeros(
-            (self.num_tables, self.embedding_size, self.embedding_size),
-            dtype=np.float64,
+        self.table_inverse_covariances = (
+            None
+            if reduced
+            else np.zeros(
+                (self.num_tables, self.embedding_size, self.embedding_size),
+                dtype=np.float64,
+            )
         )
         # log-determinant of covariance matrix for each table.
         # Since 0.5 * logDet is required in (see logMultivariateTDensity), therefore that value is kept.
@@ -151,12 +168,16 @@ class GaussianLDATrainer:
             (self.num_tables, self.embedding_size), dtype=np.float64
         )
         # Stores the squared sum of the vectors of customers at a given table
-        self.sum_squared_table_customers = np.zeros(
-            (self.num_tables, self.embedding_size, self.embedding_size),
-            dtype=np.float64,
+        self.sum_squared_table_customers = (
+            None
+            if reduced
+            else np.zeros(
+                (self.num_tables, self.embedding_size, self.embedding_size),
+                dtype=np.float64,
+            )
         )
 
-        if self.cholesky_decomp:
+        if self.cholesky_decomp and not reduced:
             # Cholesky Lower Triangular Decomposition of covariance matrix associated with each table.
             self.table_cholesky_ltriangular_mat = np.zeros(
                 (self.num_tables, self.embedding_size, self.embedding_size),
@@ -170,7 +191,7 @@ class GaussianLDATrainer:
                 (self.num_tables, self.embedding_size, self.embedding_size),
                 dtype=np.float64,
             )
-            if self.cholesky_decomp
+            if self.cholesky_decomp and not reduced
             else None
         )
 
@@ -209,13 +230,47 @@ class GaussianLDATrainer:
         self.training_corpus_encoding_sec = time.perf_counter() - encode_start
         self.training_corpus_preencoded = bool(self.preencode_corpus)
 
+        # Prior degrees of freedom actually used by the sampler: nu_0 = M for the full model,
+        # nu_0' = nu_0 - M + 1 = 1 for the reduced variants (same empty-topic predictive).
+        self.prior_nu = (
+            reduced_prior_nu(self.embedding_size) if reduced else float(self.prior.nu)
+        )
+        if reduced:
+            self._reduced = ReducedCovarianceTables(
+                covariance_type=self.covariance_type,
+                num_tables=self.num_tables,
+                embedding_size=self.embedding_size,
+                prior_mu=self.prior.mu,
+                kappa=self.prior.kappa,
+                prior_nu=self.prior_nu,
+                prior_scale=self.prior.scale_sigma,
+                table_counts=self.table_counts,
+                sum_table_customers=self.sum_table_customers,
+                table_means=self.table_means,
+                log_determinants=self.log_determinants,
+            )
+            self.table_density_kernel_backend = self._reduced.kernel_backend
+            self.avg_ll_kernel_backend = self._reduced.kernel_backend
+            self.sum_squared_table_customers_diag = (
+                self._reduced.sum_squared_table_customers_diag
+            )
+            self.table_scaled_variances = self._reduced.scaled_variances
+        else:
+            self.sum_squared_table_customers_diag = None
+            self.table_scaled_variances = None
+
         # Cache k_0\mu_0\mu_0^T, only compute it once
         # Used in calculate_table_params()
-        self.k0mu0mu0T = self.prior.kappa * np.outer(self.prior.mu, self.prior.mu)
+        self.k0mu0mu0T = (
+            None
+            if reduced
+            else self.prior.kappa * np.outer(self.prior.mu, self.prior.mu)
+        )
 
         self.num_words_for_formatting = num_words_for_formatting
         self.average_ll = list()
         self.iteration_diagnostics: list[GaussianIterationDiagnostics] = []
+        self.training_elapsed_sec = 0.0
 
         self.log.info("Initializing assignments")
         self.initialize()
@@ -227,40 +282,50 @@ class GaussianLDATrainer:
         I start with log N tables and randomly initialize customers to those tables.
 
         """
-        # First check the prior degrees of freedom.
-        # It has to be >= num_dimension
-        if self.prior.nu < self.embedding_size:
-            self.log.warn(
-                "The initial degrees of freedom of the prior is less than the dimension!. "
-                "Setting it to the number of dimensions: {}".format(self.embedding_size)
-            )
-            self.prior.nu = self.embedding_size
+        reduced = self._reduced is not None
+        if not reduced:
+            # First check the prior degrees of freedom.
+            # It has to be >= num_dimension
+            if self.prior.nu < self.embedding_size:
+                self.log.warn(
+                    "The initial degrees of freedom of the prior is less than the dimension!. "
+                    "Setting it to the number of dimensions: {}".format(
+                        self.embedding_size
+                    )
+                )
+                self.prior.nu = self.embedding_size
 
-        deg_of_freedom = self.prior.nu - self.embedding_size + 1
-        # Now calculate the covariance matrix of the multivariate T-distribution
-        coeff = (self.prior.kappa + 1.0) / (self.prior.kappa * deg_of_freedom)
-        sigma_T = self.prior.sigma * coeff
-        # This features in the original code, but doesn't get used
-        # Or is it just to check that the invert doesn't fail?
-        # sigma_Tinv = inv(sigma_T)
-        sigma_TDet_sign, sigma_TDet = slogdet(sigma_T)
-        if sigma_TDet_sign != 1:
-            raise ValueError(
-                "sign of log determinant of initial sigma is {}".format(sigma_TDet_sign)
-            )
+            deg_of_freedom = self.prior.nu - self.embedding_size + 1
+            # Now calculate the covariance matrix of the multivariate T-distribution
+            coeff = (self.prior.kappa + 1.0) / (self.prior.kappa * deg_of_freedom)
+            sigma_T = self.prior.sigma * coeff
+            # This features in the original code, but doesn't get used
+            # Or is it just to check that the invert doesn't fail?
+            # sigma_Tinv = inv(sigma_T)
+            sigma_TDet_sign, sigma_TDet = slogdet(sigma_T)
+            if sigma_TDet_sign != 1:
+                raise ValueError(
+                    "sign of log determinant of initial sigma is {}".format(
+                        sigma_TDet_sign
+                    )
+                )
 
         # Storing zeros in sumTableCustomers and later will keep on adding each customer.
         self.sum_table_customers[:] = 0
-        self.sum_squared_table_customers[:] = 0
+        if reduced:
+            self._reduced.reset()
+        else:
+            self.sum_squared_table_customers[:] = 0
         # With Cholesky: Means are set to the prior and then updated as we add each assignment
         # Without: Means are computed fully for each table after initialization
         self.table_means[:] = self.prior.mu
         # With Cholesky: This is ignored - we never use table_inverse_covariances
         # Without: This gets computed after initialization
-        self.table_inverse_covariances[:] = 0
+        if not reduced:
+            self.table_inverse_covariances[:] = 0
 
         # Initialize the cholesky decomp of each table, with no counts yet
-        if self.cholesky_decomp:
+        if self.cholesky_decomp and not reduced:
             for table in range(self.num_tables):
                 self.table_cholesky_ltriangular_mat[table] = (
                     self.prior.chol_sigma.copy()
@@ -278,6 +343,9 @@ class GaussianLDATrainer:
                 self.table_counts_per_doc[table, doc_num] += 1
                 # update the sumTableCustomers
                 self.sum_table_customers[table] += encoding
+                if reduced:
+                    self._reduced.add(table, encoding)
+                    continue
                 self.sum_squared_table_customers[table] += np.outer(encoding, encoding)
 
                 if self.cholesky_decomp:
@@ -287,7 +355,9 @@ class GaussianLDATrainer:
 
         # Now compute the table parameters of each table
         # Go over each table.
-        if not self.cholesky_decomp:
+        if reduced:
+            self._reduced.refresh_all()
+        elif not self.cholesky_decomp:
             for table in range(self.num_tables):
                 self.set_table_parameters(table)
         else:
@@ -320,7 +390,7 @@ class GaussianLDATrainer:
         )
 
     def _refresh_density_caches(self) -> None:
-        if not self.cholesky_decomp:
+        if self._reduced is not None or not self.cholesky_decomp:
             return
         self._gaussian_nu = build_gaussian_nu(
             table_counts=self.table_counts,
@@ -334,7 +404,7 @@ class GaussianLDATrainer:
         )
 
     def _refresh_table_density_cache(self, table_id: int) -> None:
-        if not self.cholesky_decomp:
+        if self._reduced is not None or not self.cholesky_decomp:
             return
         self._gaussian_nu[table_id] = (
             float(self.prior.nu)
@@ -358,6 +428,16 @@ class GaussianLDATrainer:
         return np.asarray(self.encoder.encode(doc), dtype=np.float64)
 
     def _compute_average_log_likelihood(self) -> float:
+        if self._reduced is not None:
+            if self.preencode_corpus:
+                return self._reduced.avg_ll(self.encoded_corpus, self.table_assignments)
+            return self._reduced.avg_ll(
+                (
+                    np.asarray(self.encoder.encode(doc), dtype=np.float64)
+                    for doc in self.corpus
+                ),
+                self.table_assignments,
+            )
         if self.preencode_corpus:
             return calculate_sentence_gaussianlda_avg_ll_from_encoded(
                 self.encoded_corpus,
@@ -505,6 +585,8 @@ class GaussianLDATrainer:
         This is for the non-Cholesky mode.
 
         """
+        if self._reduced is not None:
+            return self._reduced.log_density(x, table_id)
         if self.cholesky_decomp:
             return log_multivariate_tdensity(
                 np.asarray(x, dtype=np.float64),
@@ -550,6 +632,8 @@ class GaussianLDATrainer:
         This is for the non-Cholesky mode.
 
         """
+        if self._reduced is not None:
+            return self._reduced.log_density_tables(x)
         if self.cholesky_decomp:
             return log_multivariate_tdensity_tables(
                 np.asarray(x, dtype=np.float64),
@@ -612,6 +696,8 @@ class GaussianLDATrainer:
                     don't have to update the parameters
                 else update params of the old table.
         """
+        training_start = time.perf_counter()
+        reduced = self._reduced
         for iteration in range(num_iterations):
             self.log.info("Iteration {}".format(iteration))
             iteration_start = time.perf_counter()
@@ -641,15 +727,20 @@ class GaussianLDATrainer:
                     self.table_counts_per_doc[old_table_id, d] -= 1
                     # Update vector means etc
                     self.sum_table_customers[old_table_id] -= x
-                    self.sum_squared_table_customers[old_table_id] -= np.outer(x, x)
-
-                    # Topic 'old_tabe_id' now has one member fewer
-                    if self.cholesky_decomp:
-                        # Just update params for this customer
-                        self.update_table_params_chol(old_table_id, x, is_removed=True)
+                    if reduced is not None:
+                        reduced.remove(old_table_id, x)
                     else:
-                        # Now recalculate table paramters for this table
-                        self.set_table_parameters(old_table_id)
+                        self.sum_squared_table_customers[old_table_id] -= np.outer(x, x)
+
+                        # Topic 'old_tabe_id' now has one member fewer
+                        if self.cholesky_decomp:
+                            # Just update params for this customer
+                            self.update_table_params_chol(
+                                old_table_id, x, is_removed=True
+                            )
+                        else:
+                            # Now recalculate table paramters for this table
+                            self.set_table_parameters(old_table_id)
 
                     # self.check_everything(iteration, d, w, mid_sample=True)
 
@@ -669,12 +760,15 @@ class GaussianLDATrainer:
                     self.table_counts[new_table_id] += 1
                     self.table_counts_per_doc[new_table_id, d] += 1
                     self.sum_table_customers[new_table_id] += x
-                    self.sum_squared_table_customers[new_table_id] += np.outer(x, x)
-
-                    if self.cholesky_decomp:
-                        self.update_table_params_chol(new_table_id, x)
+                    if reduced is not None:
+                        reduced.add(new_table_id, x)
                     else:
-                        self.set_table_parameters(new_table_id)
+                        self.sum_squared_table_customers[new_table_id] += np.outer(x, x)
+
+                        if self.cholesky_decomp:
+                            self.update_table_params_chol(new_table_id, x)
+                        else:
+                            self.set_table_parameters(new_table_id)
 
                     # self.check_everything(iteration, d, w)
 
@@ -704,6 +798,8 @@ class GaussianLDATrainer:
                 self.log.info("Saving model")
                 self.save()
 
+        self.training_elapsed_sec += time.perf_counter() - training_start
+
     def save(self):
         os.makedirs(self.save_path, exist_ok=True)
 
@@ -714,6 +810,8 @@ class GaussianLDATrainer:
                     "alpha": self.alpha,
                     "num_tables": self.num_tables,
                     "kappa": self.prior.kappa,
+                    "covariance_type": self.covariance_type,
+                    "prior_nu": self.prior_nu,
                 },
                 f,
             )
@@ -726,7 +824,11 @@ class GaussianLDATrainer:
             ("sum_table_customers", self.sum_table_customers),
             ("sum_squared_table_customers", self.sum_squared_table_customers),
             ("table_cholesky_ltriangular_mat", self.table_cholesky_ltriangular_mat),
+            ("sum_squared_table_customers_diag", self.sum_squared_table_customers_diag),
+            ("table_scaled_variances", self.table_scaled_variances),
             ("prior_mu", self.prior.mu),
         ]:
+            if data is None:
+                continue
             with open(os.path.join(self.save_path, "{}.pkl".format(name)), "wb") as f:
                 pickle.dump(data, f)

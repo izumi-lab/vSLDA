@@ -104,3 +104,32 @@ def test_vmf_request_options_from_request_options_applies_defaults() -> None:
     assert options.target_column == "target_str"
     assert options.num_components == 1
     assert options.soft_temperature == 1.0
+    assert options.write_foldin is True
+    assert options.condition_fingerprint is None
+
+
+def test_vmf_request_options_read_the_foldin_switch_and_fingerprint() -> None:
+    options = VmfRequestOptions.from_request_options(
+        {
+            "train_csvs": ["train.csv"],
+            "test_csvs": ["test.csv"],
+            "output_dir": "results/run",
+            "logger": object(),
+            "encoder_name": "dummy-encoder",
+            "encoder_device": "cpu",
+            "kappa_default": 10.0,
+            "encoder_pre_normalize_transform": "none",
+            "encoder_whitening_eps": 1e-5,
+            "num_iterations": 1,
+            "gibbs_sweeps": 1,
+            "num_samples": 1,
+            "estimate_alpha": False,
+            "alpha_update_every": 1,
+            "alpha_max_iter": 1,
+            "alpha_tol": 1e-5,
+            "write_foldin": False,
+            "condition_fingerprint": "abc123",
+        }
+    )
+    assert options.write_foldin is False
+    assert options.condition_fingerprint == "abc123"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.evaluation.word_based import topic_assignment
 from src.evaluation.word_based.topic_assignment import (
     CollapsedFoldInConfig,
     EmptyTopicError,
@@ -247,3 +248,116 @@ def test_etm_responsibilities_conserve_token_mass() -> None:
     np.testing.assert_allclose(stats.word_counts, [2.0, 1.0])
     assert stats.total_count == pytest.approx(3.0)
     assert metadata["posterior_kind"] == "variational_token_topic_posterior_mean"
+
+
+# --------------------------------------------------------------------------- #
+# SAM: signed topic directions and the positive-part protocol
+# --------------------------------------------------------------------------- #
+
+
+def test_stable_top_word_indices_ranks_signed_scores_algebraically() -> None:
+    """SAM topic directions carry negative weights, and must rank by value.
+
+    The eligibility gate is ``np.isfinite`` and the sort key is ``-values``, so a
+    strongly negative weight is a legal candidate that ranks last rather than a
+    large-magnitude one that ranks first.
+    """
+
+    scores = np.array([[0.1, -0.9, 0.5, -0.2, 0.3]])
+    vocabulary = ["a", "b", "c", "d", "e"]
+    ranked = topic_assignment.rank_topic_words(scores, vocabulary, topn=5)
+    assert [word for word, _ in ranked[0]] == ["c", "e", "a", "d", "b"]
+
+
+def test_sam_positive_topic_profiles_projects_onto_the_simplex() -> None:
+    directions = np.array([[0.8, -0.6, 0.0], [0.0, 0.6, 0.8]])
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    beta, informative = topic_assignment.sam_positive_topic_profiles(directions)
+
+    assert np.allclose(beta.sum(axis=1), 1.0)
+    assert np.all(beta >= 0.0)
+    assert beta[0, 1] == 0.0  # the negative entry is dropped, not folded in
+    assert informative.tolist() == [True, True, True]
+
+
+def test_sam_positive_topic_profiles_flags_words_no_topic_likes() -> None:
+    directions = np.array([[0.8, -0.6, 0.0], [0.6, -0.8, 0.0]])
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    _, informative = topic_assignment.sam_positive_topic_profiles(directions)
+    assert informative.tolist() == [True, False, False]
+
+
+def test_sam_positive_topic_profiles_rejects_a_wholly_non_positive_topic() -> None:
+    directions = np.array([[0.8, 0.6], [-0.6, -0.8]])
+    with pytest.raises(ValueError, match="no positive weight"):
+        topic_assignment.sam_positive_topic_profiles(directions)
+
+
+def test_sam_positive_topic_profiles_requires_unit_directions() -> None:
+    with pytest.raises(ValueError, match="unit vectors"):
+        topic_assignment.sam_positive_topic_profiles(np.array([[1.0, 1.0]]))
+
+
+def test_sam_expected_counts_conserve_token_mass() -> None:
+    directions = np.array([[0.8, -0.6, 0.0], [0.0, 0.6, 0.8]])
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    doc_topic = np.array([[0.7, 0.3], [0.2, 0.8]])
+    corpus_bow = [[(0, 2), (1, 1)], [(1, 3), (2, 1)]]
+
+    statistics, metadata = topic_assignment.compute_sam_expected_counts(
+        doc_topic=doc_topic, topic_directions=directions, corpus_bow=corpus_bow
+    )
+    assert np.all(statistics.expected_counts >= 0.0)
+    assert statistics.total_count == pytest.approx(7.0)
+    assert metadata["retained_token_fraction"] == pytest.approx(1.0)
+    assert metadata["posterior_kind"] == (
+        "sam_positive_part_document_mixture_responsibility"
+    )
+    # Word 0 is positive only under topic 0, word 2 only under topic 1.
+    assert statistics.expected_counts[1, 0] == pytest.approx(0.0)
+    assert statistics.expected_counts[0, 2] == pytest.approx(0.0)
+
+
+def test_sam_expected_counts_exclude_words_no_topic_likes() -> None:
+    """Words negative under every topic carry no positive-part signal.
+
+    They are dropped from the statistics rather than attributed by document
+    composition alone, and the dropped mass is reported so the size of the
+    approximation is auditable per run.
+    """
+
+    directions = np.array([[0.8, -0.6, 0.0], [0.6, -0.8, 0.0]])
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    statistics, metadata = topic_assignment.compute_sam_expected_counts(
+        doc_topic=np.array([[0.5, 0.5]]),
+        topic_directions=directions,
+        corpus_bow=[[(0, 3), (1, 5)]],
+    )
+    assert statistics.total_count == pytest.approx(3.0)
+    assert metadata["informative_word_count"] == 1
+    assert metadata["retained_token_fraction"] == pytest.approx(3.0 / 8.0)
+
+
+def test_sam_expected_counts_report_positive_mass_fraction() -> None:
+    directions = np.array([[0.6, -0.8, 0.0], [1.0, 0.0, 0.0]])
+    statistics, metadata = topic_assignment.compute_sam_expected_counts(
+        doc_topic=np.array([[0.5, 0.5]]),
+        topic_directions=directions,
+        corpus_bow=[[(0, 4)]],
+    )
+    assert metadata["positive_mass_fraction_by_topic"] == pytest.approx(
+        [0.6 / 1.4, 1.0]
+    )
+    assert statistics.total_count == pytest.approx(4.0)
+
+
+def test_resolve_topic_word_protocol_covers_sam() -> None:
+    assert topic_assignment.resolve_topic_word_protocol("sam") == (
+        "sam_positive_part_topics_with_document_mixture_responsibilities"
+    )
+    assert "sam" not in topic_assignment.COLLAPSED_MODELS
+    # The tf variant shares SAM's artifacts and therefore its protocol.
+    assert topic_assignment.resolve_topic_word_protocol(
+        "sam_tf"
+    ) == topic_assignment.resolve_topic_word_protocol("sam")
+    assert "sam_tf" not in topic_assignment.COLLAPSED_MODELS

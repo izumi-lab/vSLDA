@@ -35,6 +35,7 @@ runner = CliRunner()
         ["evaluation", "topic-count-diagnostics", "--help"],
         ["evaluation", "cross-model-pair-diagnostics", "--help"],
         ["evaluation", "sentence-topic-inspection", "--help"],
+        ["evaluation", "vmf-foldin-theta", "--help"],
     ],
 )
 def test_cli_help_commands_are_registered(argv: list[str]) -> None:
@@ -669,6 +670,12 @@ def test_evaluation_word_based_metrics_dispatches_data_runs_to_registry(
             "3",
             "--coherence-score-workers",
             "2",
+            "--mvtm-empty-topic-policy",
+            "fixed-k",
+            "--reference-min-df",
+            "50",
+            "--reference-max-df-ratio",
+            "0.30",
             "--out-root",
             str(tmp_path),
         ],
@@ -694,3 +701,243 @@ def test_evaluation_word_based_metrics_dispatches_data_runs_to_registry(
     assert captured["kwargs"]["coherence_count_chunk_size"] == 17
     assert captured["kwargs"]["coherence_topic_word_workers"] == 3
     assert captured["kwargs"]["coherence_score_workers"] == 2
+    assert captured["kwargs"]["mvtm_empty_topic_policy"] == "fixed-k"
+    assert captured["kwargs"]["reference_min_df"] == 50
+    assert captured["kwargs"]["reference_max_df_ratio"] == 0.30
+
+
+def test_evaluation_topic_pair_metrics_dispatches_to_registry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+
+    def _fake_run_task(task_name: str, **kwargs) -> Path:
+        captured["task_name"] = task_name
+        captured["kwargs"] = kwargs
+        return tmp_path / "summary.csv"
+
+    monkeypatch.setattr("src.evaluation.registry.run_task", _fake_run_task)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluation",
+            "topic-pair-metrics",
+            "--dataset",
+            "dummy",
+            "--category",
+            "computer",
+            "--topic",
+            "20",
+            "--topic",
+            "30",
+            "--iteration",
+            "0",
+            "--embedding-variant",
+            "minilm",
+            "--prior-scale",
+            "0.1",
+            "--out-root",
+            str(tmp_path),
+            "--foldin-seed",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["task_name"] == "topic_pair_metrics"
+    kwargs = captured["kwargs"]
+    assert kwargs["models"] == ["vmf", "sentlda", "sentence_gaussianlda"]
+    assert kwargs["categories"] == ["computer"]
+    assert kwargs["num_topics"] == [20, 30]
+    assert kwargs["split"] == "train"
+    assert kwargs["embedding_variant"] == "minilm"
+    assert kwargs["prior_scale"] == 0.1
+    assert kwargs["cache_root"] == tmp_path / ".cache" / "sentence_embeddings"
+    assert kwargs["foldin_config"].random_seed == 3
+    assert kwargs["foldin_config"].burn_in_sweeps == 20
+
+
+def test_evaluation_vmf_foldin_theta_dispatches_to_registry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+
+    def _fake_run_task(task_name: str, **kwargs) -> Path:
+        captured["task_name"] = task_name
+        captured["kwargs"] = kwargs
+        return tmp_path / "summary.csv"
+
+    monkeypatch.setattr("src.evaluation.registry.run_task", _fake_run_task)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluation",
+            "vmf-foldin-theta",
+            "--dataset",
+            "dummy",
+            "--category",
+            "computer",
+            "--topic",
+            "20",
+            "--iteration",
+            "0",
+            "--split",
+            "test",
+            "--embedding-variant",
+            "minilm",
+            "--no-update-pointer",
+            "--foldin-seed",
+            "3",
+            "--condition-failure-policy",
+            "isolate",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["task_name"] == "vmf_foldin_theta"
+    kwargs = captured["kwargs"]
+    assert kwargs["datasets"] == ["dummy"]
+    assert kwargs["categories"] == ["computer"]
+    assert kwargs["num_topics"] == [20]
+    assert kwargs["iterations"] == [0]
+    assert kwargs["splits"] == ["test"]
+    assert kwargs["embedding_variants"] == ["minilm"]
+    assert kwargs["vmf_variants"] is None
+    assert kwargs["update_pointer"] is False
+    assert kwargs["skip_existing"] is True
+    assert kwargs["condition_failure_policy"] == "isolate"
+    assert kwargs["foldin_config"].random_seed == 3
+    assert kwargs["foldin_config"].burn_in_sweeps == 20
+    assert kwargs["cache_root"].name == "sentence_embeddings"
+
+    bad_split = runner.invoke(
+        app, ["evaluation", "vmf-foldin-theta", "--dataset", "dummy", "--split", "dev"]
+    )
+    assert bad_split.exit_code == 2
+
+
+def test_evaluation_vmf_foldin_theta_selects_the_mvtm_runs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+
+    def _fake_run_task(task_name: str, **kwargs) -> Path:
+        captured["task_name"] = task_name
+        captured["kwargs"] = kwargs
+        return tmp_path / "summary.csv"
+
+    monkeypatch.setattr("src.evaluation.registry.run_task", _fake_run_task)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluation",
+            "vmf-foldin-theta",
+            "--model",
+            "vLDA",
+            "--chunk-docs",
+            "64",
+            "--dataset",
+            "dummy",
+            "--all-vmf-runs",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = captured["kwargs"]
+    assert kwargs["model"] == "mvtm"
+    assert kwargs["chunk_docs"] == 64
+    assert kwargs["all_vmf_runs"] is True
+
+    default = runner.invoke(
+        app, ["evaluation", "vmf-foldin-theta", "--dataset", "dummy"]
+    )
+    assert default.exit_code == 0, default.output
+    assert captured["kwargs"]["model"] == "vmf_sentence_lda"
+    assert captured["kwargs"]["chunk_docs"] == 256
+
+    bad_model = runner.invoke(
+        app, ["evaluation", "vmf-foldin-theta", "--dataset", "dummy", "--model", "etm"]
+    )
+    assert bad_model.exit_code == 2
+
+
+def test_vmf_assignment_option_rejects_unknown_estimators(monkeypatch) -> None:
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+    monkeypatch.setattr(
+        "src.evaluation.registry.run_task", lambda *args, **kwargs: None
+    )
+    result = runner.invoke(
+        app,
+        ["evaluation", "classify", "--dataset", "dummy", "--vmf-assignment", "argmax"],
+    )
+    assert result.exit_code == 2
+    assert "vmf_assignment" in result.output or "vmf-assignment" in result.output
+
+
+def test_evaluation_topic_pair_summary_dispatches_paper_flag(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+
+    def _fake_run_task(task_name: str, **kwargs) -> Path:
+        captured["task_name"] = task_name
+        captured["kwargs"] = kwargs
+        return tmp_path / "wide.csv"
+
+    monkeypatch.setattr("src.evaluation.registry.run_task", _fake_run_task)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluation",
+            "topic-pair-summary",
+            "--out-root",
+            str(tmp_path),
+            "--paper",
+            "--dataset",
+            "nyt",
+            "--coherence-root",
+            str(tmp_path / "coh"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["task_name"] == "topic_pair_summary"
+    assert captured["kwargs"]["coherence_root"] == tmp_path / "coh"
+    assert captured["kwargs"]["paper"] is True
+    assert captured["kwargs"]["datasets"] == ["nyt"]
+    assert captured["kwargs"]["models"] is None
+    assert captured["kwargs"]["compact"] is True
+
+
+def test_evaluation_defaults_use_the_manuscript_estimator(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Without flags, classification reads foldincounts and entropy resolves per model."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("src.evaluation.registry.register_builtin_tasks", lambda: None)
+
+    def _fake_run_task(task_name: str, **kwargs):
+        captured[task_name] = kwargs
+        return tmp_path / "out"
+
+    monkeypatch.setattr("src.evaluation.registry.run_task", _fake_run_task)
+    result = runner.invoke(app, ["evaluation", "classify", "--dataset", "dummy"])
+    assert result.exit_code == 0, result.output
+    assert captured["classification"]["vmf_assignment"] == "foldincounts"
+    result = runner.invoke(
+        app,
+        ["evaluation", "entropy-based-metrics", "--dataset", "dummy", "--topic", "4"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["entropy_based_metrics"]["doc_topic_source"] == "auto"

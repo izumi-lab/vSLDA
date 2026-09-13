@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Sequence, Tuple
 
 import numpy as np
 
+from src.baselines.params import normalize_covariance_type
 from src.core.artifacts import CURRENT_POINTER_FILENAME, load_json, save_json
 from src.core.paths import resolve_project_path
+from src.core.vmf_assignment import DEFAULT_VMF_ASSIGNMENT, LEGACY_VMF_ASSIGNMENT
+from src.core.vmf_variant import vmf_variant_matches
 from src.evaluation.reporting import read_evaluation_json, write_csv_rows
+from src.evaluation.reports.latex_tables import (
+    format_pm,
+    latex_escape_text,
+    mean_std,
+    rank_and_mark,
+)
 from src.evaluation.schema import build_evaluation_meta
 
 from .config import (
@@ -57,6 +67,8 @@ def _aggregate(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> tuple[
     Dict[str, Dict[str, List[float]]],
     dict[str, Any],
@@ -82,6 +94,8 @@ def _aggregate(
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         )
         for file_path in file_paths:
             if not file_path.exists():
@@ -124,6 +138,8 @@ def _matches_metric_meta(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> bool:
     if not meta:
         return False
@@ -133,7 +149,7 @@ def _matches_metric_meta(
         return False
     if int(meta.get("topics", -1)) != int(topics):
         return False
-    if str(meta.get("vmf_assignment", "hard")) != str(vmf_assignment):
+    if str(meta.get("vmf_assignment", LEGACY_VMF_ASSIGNMENT)) != str(vmf_assignment):
         return False
     if str(meta.get("data_run", "default")) != str(data_run):
         return False
@@ -176,6 +192,15 @@ def _matches_metric_meta(
             return False
         if resolved != float(prior_scale):
             return False
+    # Runs made before the covariance variants existed store no key (or null) and
+    # are full-covariance; a reduced variant is only summarized when requested.
+    recorded_covariance = normalize_covariance_type(meta.get("covariance_type"))
+    if recorded_covariance != normalize_covariance_type(covariance_type):
+        return False
+    # Runs made before the vMF hyperparameter sweep store no key (or null) and are the
+    # default runs; a sweep variant is only summarized when requested.
+    if not vmf_variant_matches(meta.get("vmf_variant"), vmf_variant):
+        return False
     return True
 
 
@@ -241,6 +266,8 @@ def _resolve_metric_path_from_latest(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> Path | None:
     latest_root = build_classification_latest_dir(
         result_root=result_root,
@@ -280,6 +307,8 @@ def _resolve_metric_path_from_latest(
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         ):
             matches.append((candidate, meta))
     if not matches:
@@ -307,6 +336,8 @@ def _resolve_metric_paths_from_latest(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> list[Path]:
     latest_root = build_classification_latest_dir(
         result_root=result_root,
@@ -346,6 +377,8 @@ def _resolve_metric_paths_from_latest(
             feature_resolve_mode=feature_resolve_mode,
             selected_models=selected_models,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         ):
             matches.append((candidate, meta))
     if not matches:
@@ -376,6 +409,8 @@ def _resolve_metric_path(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> Path:
     filename = _metric_filename(metric, dataset, topics)
     latest_candidate = _resolve_metric_path_from_latest(
@@ -393,6 +428,8 @@ def _resolve_metric_path(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
     if latest_candidate is not None:
         return latest_candidate
@@ -409,6 +446,8 @@ def _resolve_metric_path(
             embedding_variants=embedding_variants,
             feature_resolve_mode=feature_resolve_mode,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
         )
         candidate = (
             build_classification_output_dir_from_condition(
@@ -450,6 +489,8 @@ def _resolve_metric_path(
                 feature_resolve_mode=feature_resolve_mode,
                 selected_models=selected_models,
                 prior_scale=prior_scale,
+                covariance_type=covariance_type,
+                vmf_variant=vmf_variant,
             ):
                 matches.append((candidate, meta))
         selected_match = _select_metric_match(
@@ -480,6 +521,8 @@ def _resolve_metric_paths(
     feature_resolve_mode: str,
     selected_models: Sequence[str] | None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> list[Path]:
     filename = _metric_filename(metric, dataset, topics)
     latest_candidates = _resolve_metric_paths_from_latest(
@@ -497,6 +540,8 @@ def _resolve_metric_paths(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
     if latest_candidates:
         return latest_candidates
@@ -516,6 +561,8 @@ def _resolve_metric_paths(
                 embedding_variants=embedding_variants,
                 feature_resolve_mode=feature_resolve_mode,
                 prior_scale=prior_scale,
+                covariance_type=covariance_type,
+                vmf_variant=vmf_variant,
             )
         ]
 
@@ -547,6 +594,8 @@ def _resolve_metric_paths(
                 feature_resolve_mode=feature_resolve_mode,
                 selected_models=selected_models,
                 prior_scale=prior_scale,
+                covariance_type=covariance_type,
+                vmf_variant=vmf_variant,
             ):
                 matches.append((candidate, meta))
         if matches:
@@ -578,45 +627,107 @@ def _merge_feature_catalogs(
                 bucket.append(normalized_entry)
 
 
+# Table model names of the vMF Sentence LDA features, whatever the estimator suffix.
+VMF_FEATURE_NAME_PREFIX = "vMF Sentence LDA"
+# Feature names whose document-topic estimator is ``vmf_assignment`` (the vMF
+# family: vMF Sentence LDA and MvTM / vLDA).
+VMF_FAMILY_FEATURE_NAME_PREFIXES: tuple[str, ...] = (VMF_FEATURE_NAME_PREFIX, "MvTM")
+
+
+def _build_provenance(
+    feature_catalog_by_category: dict[str, list[dict[str, Any]]],
+    *,
+    categories: Sequence[str],
+    models: Sequence[str],
+    vmf_assignment: str | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Map each table model to the feature-catalog entry it came from.
+
+    Table model names carry a classifier suffix (``"ETM [googlenews300] [LogReg]"``)
+    while catalog entries do not (``"ETM [googlenews300]"``), so the match is on
+    the catalog name being a prefix of the model name. ``vmf_assignment`` names
+    the document-topic estimator of the vMF-family cells (vMF Sentence LDA and
+    MvTM: ``hard``, ``soft``, ``foldin`` or ``foldincounts``); the other baseline
+    cells record ``None``.
+    """
+    provenance: dict[str, dict[str, dict[str, Any]]] = {}
+    for category in categories:
+        entries = feature_catalog_by_category.get(str(category), [])
+        bucket: dict[str, dict[str, Any]] = {}
+        for model in models:
+            for entry in entries:
+                feature_name = str(entry.get("feature_name") or "")
+                if not feature_name:
+                    continue
+                if model == feature_name or model.startswith(feature_name + " ["):
+                    encoder_config = entry.get("encoder_config")
+                    if not isinstance(encoder_config, dict):
+                        encoder_config = {}
+                    baseline_params = entry.get("baseline_params")
+                    if not isinstance(baseline_params, dict):
+                        baseline_params = {}
+                    bucket[model] = {
+                        "feature_name": feature_name,
+                        "embedding_variant": entry.get("embedding_variant"),
+                        "word2vec": encoder_config.get("word2vec")
+                        or baseline_params.get("word2vec"),
+                        "prior_scale": entry.get("prior_scale"),
+                        "covariance_type": entry.get("covariance_type"),
+                        "vmf_variant": entry.get("vmf_variant"),
+                        "vmf_hyperparameters": entry.get("vmf_hyperparameters"),
+                        "vmf_assignment": (
+                            vmf_assignment
+                            if feature_name.startswith(VMF_FAMILY_FEATURE_NAME_PREFIXES)
+                            else None
+                        ),
+                        "source_condition_id": entry.get("source_condition_id"),
+                    }
+                    break
+        provenance[str(category)] = bucket
+    return provenance
+
+
+def _write_scores_json(output_path: Path, report: dict[str, Any]) -> None:
+    """Write the unformatted per-run scores next to the LaTeX table.
+
+    Downstream table builders aggregate from this file instead of parsing the
+    rendered ``.tex``; the ``.tex`` stays as an independent cross-check.
+    """
+    meta = report.get("_meta", {})
+    results = report.get("results", {})
+    payload = {
+        "metric": meta.get("metric"),
+        "dataset": meta.get("dataset"),
+        "data_run": meta.get("data_run"),
+        "topics": meta.get("topics"),
+        "iterations": meta.get("iterations"),
+        "classifiers": meta.get("classifiers"),
+        "embedding_variants": meta.get("embedding_variants"),
+        "vmf_assignment": meta.get("vmf_assignment"),
+        "models": results.get("models", []),
+        "categories": [row["category"] for row in results.get("rows", [])],
+        "scores": results.get("scores", {}),
+        "provenance": results.get("provenance", {}),
+    }
+    save_json(payload, output_path.with_suffix(".scores.json"))
+
+
 def _format_results(values: List[float]) -> str:
-    mean = round(np.mean(values), 2)
-    std = round(np.std(values), 2)
-    return f"{mean:.2f}~\\ensuremath{{\\pm}}~{std:.2f}"
+    return format_pm(*mean_std(values), digits=2)
 
 
 def _rank_and_mark(row: Dict[str, str], means: Dict[str, float]) -> Dict[str, str]:
-    if not means:
-        return row
-    ordered = sorted(means.items(), key=lambda x: x[1])
-    best = ordered[-1][0]
-    second = ordered[-2][0] if len(ordered) > 1 else best
-    for model, text in row.items():
-        if model == best:
-            row[model] = r"\textbf{" + text + "}"
-        elif model == second:
-            row[model] = r"\underline{" + text + "}"
-    return row
+    return rank_and_mark(row, means)
 
 
 def _latex_escape_text(value: Any) -> str:
-    text = str(value)
-    replacements = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&",
-        "%": r"\%",
-        "$": r"\$",
-        "#": r"\#",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "~": r"\textasciitilde{}",
-        "^": r"\textasciicircum{}",
-    }
-    return "".join(replacements.get(char, char) for char in text)
+    return latex_escape_text(value)
 
 
 MODEL_TABLE_LABELS = {
     "Blei LDA": "LDA",
+    "SAM": "SAM",
+    "SAM (tf-idf)": "SAM (tf-idf)",
     "sentLDA": "SentLDA",
     "Gaussian k-means": "GCLU",
     "Spherical k-means": "SCLU",
@@ -636,6 +747,11 @@ MODEL_SELECTOR_ALIASES = {
     "BERTopic (UMAP + k-means)": ["bertopic_kmeans", "bertopic"],
     "Contextual TM": ["ctm"],
     "Sentence LDA": ["sentence_gaussianlda", "gslda"],
+    # The two SAM feature specs carry display names that do not normalize to their
+    # model keys: `sam` renders as "SAM (tf-idf)" and `sam_tf` as "SAM". Without these
+    # aliases `--model sam` matches nothing and the column is dropped silently.
+    "SAM (tf-idf)": ["sam"],
+    "SAM": ["sam_tf"],
 }
 
 
@@ -648,17 +764,26 @@ def _normalize_model_selector(value: str) -> str:
     return "".join(char.lower() for char in str(value) if char.isalnum())
 
 
+# The vMF Sentence LDA feature name carries its document-topic estimator as a
+# parenthesized suffix ("vMF Sentence LDA (soft)", "... (fold-in)", "... (fold-in counts)");
+# the selector names the model, so the suffix is dropped before matching.
+_VMF_ESTIMATOR_SUFFIX_RE = re.compile(r"\s*\((?:soft|fold-in|fold-in counts)\)\s*$")
+
+
 def _model_matches_selector(model_name: str, selector: str) -> bool:
     normalized_selector = _normalize_model_selector(selector)
     if not normalized_selector:
         return False
     base_name = str(model_name).split(" [", 1)[0]
+    model_base = _VMF_ESTIMATOR_SUFFIX_RE.sub("", base_name)
     candidates = {
         str(model_name),
         base_name,
+        model_base,
         _model_table_label(model_name),
     }
     candidates.update(MODEL_SELECTOR_ALIASES.get(base_name, []))
+    candidates.update(MODEL_SELECTOR_ALIASES.get(model_base, []))
     return normalized_selector in {
         _normalize_model_selector(candidate) for candidate in candidates
     }
@@ -932,7 +1057,7 @@ def build_summary_report(
     *,
     data_run: str = "default",
     classifiers: List[str] | None = None,
-    vmf_assignment: str = "hard",
+    vmf_assignment: str = DEFAULT_VMF_ASSIGNMENT,
     alignment_mode: str = DEFAULT_ALIGNMENT_MODE,
     result_root: Path = RESULT_ROOT,
     target_column: str = "target_str",
@@ -942,6 +1067,8 @@ def build_summary_report(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
 ) -> dict[str, Any]:
@@ -961,6 +1088,8 @@ def build_summary_report(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
     if not results:
         return {}
@@ -999,7 +1128,7 @@ def build_summary_report(
             scores = results.get(category, {}).get(model, [])
             if scores:
                 row[model] = _format_results(scores)
-                means_for_rank[model] = round(np.mean(scores), 2)
+                means_for_rank[model] = float(np.mean(scores))
             else:
                 row[model] = "-"
         row = _rank_and_mark(row, means_for_rank)
@@ -1039,6 +1168,8 @@ def build_summary_report(
                 None if selected_models is None else list(selected_models)
             ),
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
+            vmf_variant=vmf_variant,
             excluded_categories=(
                 None if excluded_categories is None else list(excluded_categories)
             ),
@@ -1063,6 +1194,22 @@ def build_summary_report(
         "results": {
             "models": ordered_models,
             "rows": rows,
+            "scores": {
+                str(category): {
+                    model: [
+                        float(score)
+                        for score in results.get(category, {}).get(model, [])
+                    ]
+                    for model in ordered_models
+                }
+                for category in categories
+            },
+            "provenance": _build_provenance(
+                feature_catalog_by_category,
+                categories=[str(category) for category in categories],
+                models=ordered_models,
+                vmf_assignment=vmf_assignment,
+            ),
         },
     }
 
@@ -1075,7 +1222,7 @@ def write_summary(
     *,
     data_run: str = "default",
     classifiers: List[str] | None = None,
-    vmf_assignment: str = "hard",
+    vmf_assignment: str = DEFAULT_VMF_ASSIGNMENT,
     alignment_mode: str = DEFAULT_ALIGNMENT_MODE,
     result_root: Path = RESULT_ROOT,
     target_column: str = "target_str",
@@ -1085,6 +1232,8 @@ def write_summary(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
     output_path: Path | None = None,
@@ -1106,6 +1255,8 @@ def write_summary(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         excluded_categories=excluded_categories,
         include_all_category=include_all_category,
     )
@@ -1136,6 +1287,7 @@ def write_summary(
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(latex_table + "\n", encoding="utf-8")
+        _write_scores_json(output_path, report)
         coverage = report.get("_meta", {}).get("run_coverage")
         if isinstance(coverage, dict):
             _write_run_coverage_outputs(output_path=output_path, coverage=coverage)

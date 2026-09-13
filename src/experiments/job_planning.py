@@ -29,6 +29,7 @@ class CategoryJob:
     parallelism: "ParallelismPlan"
     config: ComparisonConfig
     vmf_soft_temp: float
+    vmf_foldin: bool = True
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ def build_jobs(
     seed_base: int | None,
     parallelism: ParallelismPlan,
     vmf_soft_temp: float,
+    vmf_foldin: bool = True,
 ) -> List[CategoryJob]:
     jobs: List[CategoryJob] = []
     for data_run in data_runs:
@@ -123,6 +125,7 @@ def build_jobs(
                             parallelism=parallelism,
                             config=cfg,
                             vmf_soft_temp=vmf_soft_temp,
+                            vmf_foldin=vmf_foldin,
                         )
                     )
     return jobs

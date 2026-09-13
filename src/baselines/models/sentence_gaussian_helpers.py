@@ -14,6 +14,15 @@ from src.baselines.models.gaussian_numerics import (
     log_multivariate_tdensity_tables,
     sample_doc_topic_assignments,
 )
+from src.baselines.models.gaussian_reduced_numerics import (
+    GAUSSIAN_REDUCED_KERNEL_BACKEND,
+    compute_reduced_table_parameters,
+    is_reduced_covariance,
+    log_reduced_tdensity,
+    log_reduced_tdensity_tables,
+    normalize_covariance_type,
+    reduced_prior_nu,
+)
 from src.core.artifacts import load_artifact_json, load_artifact_pickle
 from src.utils.encoder import SentenceEncoder
 
@@ -73,7 +82,12 @@ class SentenceGaussianLdaModel:
         table_counts: np.ndarray,
         table_means: np.ndarray,
         log_determinants: np.ndarray,
-        table_cholesky_ltriangular_mat: np.ndarray,
+        table_cholesky_ltriangular_mat: np.ndarray | None = None,
+        covariance_type: str = "full",
+        prior_nu: float | None = None,
+        prior_scale: float | None = None,
+        sum_table_customers: np.ndarray | None = None,
+        sum_squared_table_customers_diag: np.ndarray | None = None,
     ) -> None:
         self.alpha = float(alpha)
         self.encoder = encoder
@@ -82,24 +96,72 @@ class SentenceGaussianLdaModel:
         self.table_counts = np.asarray(table_counts, dtype=np.float64)
         self.table_means = np.asarray(table_means, dtype=np.float64)
         self.log_determinants = np.asarray(log_determinants, dtype=np.float64)
-        self.table_cholesky_ltriangular_mat = np.asarray(
-            table_cholesky_ltriangular_mat,
-            dtype=np.float64,
-        )
         self.prior_mu = np.asarray(prior_mu, dtype=np.float64)
         self.kappa = float(kappa)
+        self.covariance_type = normalize_covariance_type(covariance_type)
+        self.prior_scale = None if prior_scale is None else float(prior_scale)
+        self.scaled_variances: np.ndarray | None = None
 
-        self.nu = build_gaussian_nu(
-            table_counts=self.table_counts,
-            embedding_size=self.embedding_size,
-        )
-        self.scaled_table_cholesky_ltriangular_mat = build_scaled_cholesky(
-            table_counts=self.table_counts,
-            kappa=self.kappa,
-            embedding_size=self.embedding_size,
-            table_cholesky_ltriangular_mat=self.table_cholesky_ltriangular_mat,
-        )
-        self.table_density_kernel_backend = GAUSSIAN_TABLE_DENSITY_BACKEND
+        if is_reduced_covariance(self.covariance_type):
+            # Rebuild the predictive parameters from the sufficient statistics, as the
+            # full-covariance path rebuilds nu and the scaled Cholesky factors from the counts.
+            if sum_table_customers is None or sum_squared_table_customers_diag is None:
+                raise ValueError(
+                    "Reduced-covariance SentenceGaussianLdaModel requires "
+                    "sum_table_customers and sum_squared_table_customers_diag."
+                )
+            if self.prior_scale is None:
+                raise ValueError(
+                    "Reduced-covariance SentenceGaussianLdaModel requires prior_scale."
+                )
+            self.prior_nu = (
+                reduced_prior_nu(self.embedding_size)
+                if prior_nu is None
+                else float(prior_nu)
+            )
+            self.table_cholesky_ltriangular_mat = None
+            self.scaled_table_cholesky_ltriangular_mat = None
+            params = compute_reduced_table_parameters(
+                covariance_type=self.covariance_type,
+                table_counts=self.table_counts,
+                sum_table_customers=np.asarray(sum_table_customers, dtype=np.float64),
+                sum_squared_table_customers_diag=np.asarray(
+                    sum_squared_table_customers_diag, dtype=np.float64
+                ),
+                prior_mu=self.prior_mu,
+                kappa=self.kappa,
+                prior_nu=self.prior_nu,
+                prior_scale=self.prior_scale,
+            )
+            self.table_means = params.table_means
+            self.nu = params.nu
+            self.scaled_variances = params.scaled_variances
+            self.log_determinants = params.log_determinants
+            self.table_density_kernel_backend = GAUSSIAN_REDUCED_KERNEL_BACKEND
+        else:
+            if table_cholesky_ltriangular_mat is None:
+                raise ValueError(
+                    "Full-covariance SentenceGaussianLdaModel requires "
+                    "table_cholesky_ltriangular_mat."
+                )
+            self.prior_nu = (
+                float(self.embedding_size) if prior_nu is None else float(prior_nu)
+            )
+            self.table_cholesky_ltriangular_mat = np.asarray(
+                table_cholesky_ltriangular_mat,
+                dtype=np.float64,
+            )
+            self.nu = build_gaussian_nu(
+                table_counts=self.table_counts,
+                embedding_size=self.embedding_size,
+            )
+            self.scaled_table_cholesky_ltriangular_mat = build_scaled_cholesky(
+                table_counts=self.table_counts,
+                kappa=self.kappa,
+                embedding_size=self.embedding_size,
+                table_cholesky_ltriangular_mat=self.table_cholesky_ltriangular_mat,
+            )
+            self.table_density_kernel_backend = GAUSSIAN_TABLE_DENSITY_BACKEND
         self.posterior_sampling_kernel_backend = GAUSSIAN_POSTERIOR_SAMPLING_BACKEND
 
     def log_multivariate_tdensity(
@@ -107,6 +169,17 @@ class SentenceGaussianLdaModel:
         x: np.ndarray,
         table_id: int,
     ) -> np.ndarray:
+        if self.scaled_variances is not None:
+            return log_reduced_tdensity(
+                x,
+                covariance_type=self.covariance_type,
+                table_id=table_id,
+                embedding_size=self.embedding_size,
+                nu=self.nu,
+                table_means=self.table_means,
+                log_determinants=self.log_determinants,
+                scaled_variances=self.scaled_variances,
+            )
         return log_multivariate_tdensity(
             x,
             table_id=table_id,
@@ -120,6 +193,16 @@ class SentenceGaussianLdaModel:
         )
 
     def log_multivariate_tdensity_tables(self, x: np.ndarray) -> np.ndarray:
+        if self.scaled_variances is not None:
+            return log_reduced_tdensity_tables(
+                np.asarray(x, dtype=np.float64),
+                covariance_type=self.covariance_type,
+                embedding_size=self.embedding_size,
+                nu=self.nu,
+                table_means=self.table_means,
+                log_determinants=self.log_determinants,
+                scaled_variances=self.scaled_variances,
+            )
         return log_multivariate_tdensity_tables(
             np.asarray(x, dtype=np.float64),
             embedding_size=self.embedding_size,
@@ -193,7 +276,12 @@ def load_sentence_gaussianlda_model(
     encoder: SentenceEncoder,
 ) -> PersistedSentenceGaussianLdaModel:
     params = load_artifact_json(param_dir / "params.json")
-    model = SentenceGaussianLdaModel(
+    # Artifacts written before the covariance variants exist carry no ``covariance_type``
+    # and are full-covariance.
+    covariance_type = normalize_covariance_type(params.get("covariance_type"))
+    prior_nu = params.get("prior_nu")
+    prior_scale = params.get("prior_scale")
+    common = dict(
         prior_mu=load_artifact_pickle(param_dir / "prior_mu.pkl"),
         encoder=encoder,
         num_tables=int(params["num_tables"]),
@@ -202,8 +290,25 @@ def load_sentence_gaussianlda_model(
         table_counts=load_artifact_pickle(param_dir / "table_counts.pkl"),
         table_means=load_artifact_pickle(param_dir / "table_means.pkl"),
         log_determinants=load_artifact_pickle(param_dir / "log_determinants.pkl"),
-        table_cholesky_ltriangular_mat=load_artifact_pickle(
-            param_dir / "table_cholesky_ltriangular_mat.pkl"
-        ),
+        covariance_type=covariance_type,
+        prior_nu=None if prior_nu is None else float(prior_nu),
+        prior_scale=None if prior_scale is None else float(prior_scale),
     )
+    if is_reduced_covariance(covariance_type):
+        model = SentenceGaussianLdaModel(
+            **common,
+            sum_table_customers=load_artifact_pickle(
+                param_dir / "sum_table_customers.pkl"
+            ),
+            sum_squared_table_customers_diag=load_artifact_pickle(
+                param_dir / "sum_squared_table_customers_diag.pkl"
+            ),
+        )
+    else:
+        model = SentenceGaussianLdaModel(
+            **common,
+            table_cholesky_ltriangular_mat=load_artifact_pickle(
+                param_dir / "table_cholesky_ltriangular_mat.pkl"
+            ),
+        )
     return PersistedSentenceGaussianLdaModel(model=model, encoder=encoder)

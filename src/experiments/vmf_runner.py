@@ -18,7 +18,13 @@ from src.core.paths import (
     write_vmf_latest_pointer,
 )
 from src.core.result_identity import build_execution_id
+from src.core.vmf_variant import format_vmf_parameter_variant
 from src.experiments.config import resolve_targets
+from src.experiments.config_schema import (
+    DEFAULT_KAPPA_SOLVER,
+    DEFAULT_SAEM_BURN_IN,
+    DEFAULT_SAEM_DECAY,
+)
 from src.experiments.job_planning import CategoryJob, resolve_algorithm_variant
 from src.models import ModelRunRequest, run_model_request
 from src.utils.encoder_profiles import encoder_model_alias
@@ -60,6 +66,9 @@ class VmfRunOptions:
     min_topic_count_for_repair: int
     avg_log_likelihood_every: int
     invariant_check_every: int
+    saem_burn_in: int | None
+    saem_decay: float
+    kappa_solver: str
     algorithm_variant: str
     encoder_name: str
     encoder_device: str
@@ -89,6 +98,7 @@ class VmfRunOptions:
     ja_dicdir: str | None
     ja_require_unidic: bool
     soft_temperature: float
+    write_foldin: bool
     data_run: str
     condition_id: str
     condition_fingerprint: str
@@ -137,13 +147,77 @@ def build_experiment_axes(job: CategoryJob) -> ExperimentAxes:
     )
 
 
+def vmf_hyperparameters(train: object, *, num_topics: int) -> dict[str, object]:
+    """The training hyperparameters a run uses, keyed as in ``src.core.vmf_variant``.
+
+    ``alpha0`` is the effective initial Dirichlet value: the configured scalar (or vector),
+    or ``50/K`` when the config leaves it unset.
+    """
+    alpha = _train_attr(train, "alpha")
+    if alpha is None:
+        alpha0: object = 50.0 / float(num_topics)
+    elif isinstance(alpha, (list, tuple)):
+        alpha0 = [float(value) for value in alpha]
+    else:
+        alpha0 = float(alpha)
+    return {
+        "kappa0": float(_train_attr(train, "kappa_default", 10.0)),
+        "alpha0": alpha0,
+        "alpha0_is_default": alpha is None,
+        "gibbs_sweeps": int(_train_attr(train, "gibbs_sweeps", 1)),
+        "num_samples": int(_train_attr(train, "num_samples", 1)),
+        "num_iterations": int(_train_attr(train, "num_iterations")),
+        # SAEM settings (None burn-in = plain MCEM); recorded since 2026-09-06, so runs
+        # trained earlier carry no such keys in their metadata.
+        "saem_burn_in": (
+            None
+            if _train_attr(train, "saem_burn_in", DEFAULT_SAEM_BURN_IN) is None
+            else int(_train_attr(train, "saem_burn_in", DEFAULT_SAEM_BURN_IN))
+        ),
+        "saem_decay": float(_train_attr(train, "saem_decay", DEFAULT_SAEM_DECAY)),
+    }
+
+
+def vmf_parameter_variant(train: object, *, num_topics: int) -> str | None:
+    """Result-path label of the overridden hyperparameters (None for the default run)."""
+    return format_vmf_parameter_variant(
+        vmf_hyperparameters(train, num_topics=num_topics),
+        tuple(_train_attr(train, "hyperparameter_overrides", ()) or ()),
+    )
+
+
 def build_vmf_condition_payload(
     job: CategoryJob,
     *,
     algorithm_variant: str,
 ) -> dict[str, object]:
     cfg = job.config
+    parameter_variant = vmf_parameter_variant(cfg.train, num_topics=int(job.num_topics))
+    # Only an overridden hyperparameter enters the fingerprint, so every run driven by the
+    # YAML alone keeps its historical condition id (as covariance_type == "full" is stripped
+    # from the Gaussian baseline identity).
+    variant_payload = (
+        {}
+        if parameter_variant is None
+        else {"vmf_parameter_variant": parameter_variant}
+    )
+    # The SAEM settings and the Newton kappa solver enter the fingerprint only when active
+    # (the default since 2026-09-11), so that every run of the plain MCEM with the Banerjee
+    # kappa (``saem_burn_in: null``, ``kappa_solver: banerjee``) keeps its historical
+    # condition id.
+    saem_burn_in = _train_attr(cfg.train, "saem_burn_in", DEFAULT_SAEM_BURN_IN)
+    kappa_solver = str(_train_attr(cfg.train, "kappa_solver", DEFAULT_KAPPA_SOLVER))
+    estimation_payload: dict[str, object] = {}
+    if saem_burn_in is not None:
+        estimation_payload["saem_burn_in"] = int(saem_burn_in)
+        estimation_payload["saem_decay"] = float(
+            _train_attr(cfg.train, "saem_decay", DEFAULT_SAEM_DECAY)
+        )
+    if kappa_solver != "banerjee":
+        estimation_payload["kappa_solver"] = kappa_solver
     return {
+        **variant_payload,
+        **estimation_payload,
         "dataset": cfg.dataset.name,
         "data_run": job.data_run_name,
         "train_csvs": [str(path) for path in job.train_csvs],
@@ -261,6 +335,9 @@ def build_vmf_run_options(
         ),
         avg_log_likelihood_every=cfg.train.avg_log_likelihood_every,
         invariant_check_every=cfg.train.invariant_check_every,
+        saem_burn_in=_train_attr(cfg.train, "saem_burn_in", DEFAULT_SAEM_BURN_IN),
+        saem_decay=float(_train_attr(cfg.train, "saem_decay", DEFAULT_SAEM_DECAY)),
+        kappa_solver=str(_train_attr(cfg.train, "kappa_solver", DEFAULT_KAPPA_SOLVER)),
         algorithm_variant=axes.algorithm_variant,
         encoder_name=cfg.encoder.model_name,
         encoder_device=cfg.encoder.device,
@@ -292,6 +369,7 @@ def build_vmf_run_options(
         ja_dicdir=cfg.preprocess.ja_dicdir,
         ja_require_unidic=cfg.preprocess.ja_require_unidic,
         soft_temperature=job.vmf_soft_temp,
+        write_foldin=bool(getattr(job, "vmf_foldin", True)),
         data_run=job.data_run_name,
         condition_id=vmf_condition_id,
         condition_fingerprint=vmf_condition_fingerprint,
@@ -321,11 +399,14 @@ def run_vmf_job(*, job: CategoryJob, logger: object) -> VmfRunExecution:
         job.category,
         job.targets,
     )
+    hyperparameters = vmf_hyperparameters(cfg.train, num_topics=int(job.num_topics))
+    parameter_variant = vmf_parameter_variant(cfg.train, num_topics=int(job.num_topics))
     vmf_out_dir = build_vmf_archive_dir(
         iteration=job.iteration,
         num_topics=job.num_topics,
         num_components=cfg.train.num_components,
         embedding_variant=_embedding_variant_from_encoder(cfg.encoder),
+        parameter_variant=parameter_variant,
         category=job.category,
         run_name=job.data_run_name,
         started_at=started_at,
@@ -375,12 +456,16 @@ def run_vmf_job(*, job: CategoryJob, logger: object) -> VmfRunExecution:
         num_components=int(cfg.train.num_components),
         max_kappa=float(vmf_options.max_kappa),
         encoder_config=_encoder_config_payload(job),
+        parameter_variant=parameter_variant,
+        hyperparameters=hyperparameters,
     )
     metadata_path = vmf_out_dir / METADATA_FILENAME
     save_json(
         {
             **vmf_condition_payload,
             "model_name": "vmf_sentence_lda",
+            "parameter_variant": parameter_variant,
+            "hyperparameters": hyperparameters,
             "seed": (
                 int(job.seed)
                 if job.seed is not None
@@ -419,6 +504,7 @@ def run_vmf_job(*, job: CategoryJob, logger: object) -> VmfRunExecution:
         condition_fingerprint=vmf_condition_fingerprint,
         artifacts=serialized_artifacts,
         embedding_variant=_embedding_variant_from_encoder(cfg.encoder),
+        parameter_variant=parameter_variant,
         encoder_config=_encoder_config_payload(job),
         dataset_root=cfg.output_root,
     )

@@ -60,7 +60,27 @@ def test_load_model_provenance_reads_vmf_metadata(tmp_path: Path) -> None:
         "algorithm_variant": "num_components=2",
         "encoder_model": "sentence-transformers/all-mpnet-base-v2",
         "embedding_preprocess_variant": "none",
+        "parameter_variant": None,
+        "vmf_hyperparameters": None,
     }
+
+
+def test_load_model_provenance_reads_vmf_hyperparameter_variant(tmp_path: Path) -> None:
+    (tmp_path / "metadata.json").write_text(
+        (
+            '{"schema":"vmf_artifact_metadata","axes":{"model_family":"vmf_sentence_lda"},'
+            '"parameter_variant":"kappa0-100",'
+            '"hyperparameters":{"kappa0":100.0,"alpha0":2.5,"alpha0_is_default":true,'
+            '"gibbs_sweeps":20,"num_samples":8,"num_iterations":10}}'
+        ),
+        encoding="utf-8",
+    )
+
+    provenance = load_model_provenance(tmp_path, model_key="vmf_sentence_lda")
+
+    assert provenance["parameter_variant"] == "kappa0-100"
+    assert provenance["vmf_hyperparameters"]["kappa0"] == 100.0
+    assert provenance["vmf_hyperparameters"]["num_iterations"] == 10
 
 
 def test_load_model_provenance_for_artifact_uses_parent_directory(

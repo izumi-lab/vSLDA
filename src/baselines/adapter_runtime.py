@@ -11,6 +11,7 @@ from src.baselines.params import (
     DEFAULT_PRETRAINED_WORD2VEC,
     baseline_params_to_options,
     baseline_params_to_variant,
+    format_covariance_variant,
     format_prior_scale_variant,
     normalize_baseline_params,
 )
@@ -56,6 +57,9 @@ GAUSSIAN_TERMINAL_NORMALIZE_RUNNERS = {
 }
 
 GAUSSIAN_PRIOR_SCALE_RUNNERS = {"gaussianlda", "sentence_gaussianlda"}
+# Runners whose result paths also carry a covariance-type label (``cov-diag`` / ``cov-iso``;
+# nothing for ``full``, so the paths of every existing run are unchanged).
+GAUSSIAN_COVARIANCE_TYPE_RUNNERS = {"sentence_gaussianlda"}
 
 _GLOVE_RE = re.compile(r"^glove-wiki-gigaword-(?P<dim>\d+)$")
 _GOOGLE_NEWS_RE = re.compile(r"^word2vec-google-news-(?P<dim>\d+)$")
@@ -170,7 +174,27 @@ def _baseline_parameter_variant(
     if runner_key not in GAUSSIAN_PRIOR_SCALE_RUNNERS:
         return None
     normalized = baseline_params_to_options(baseline_params)
-    return format_prior_scale_variant(float(normalized.get("prior_scale", 0.1)))
+    return compose_gaussian_parameter_variant(
+        runner=runner_key,
+        prior_scale=float(normalized.get("prior_scale", 0.1)),
+        covariance_type=normalized.get("covariance_type"),
+    )
+
+
+def compose_gaussian_parameter_variant(
+    *,
+    runner: str,
+    prior_scale: float,
+    covariance_type: object = None,
+) -> str:
+    """``psi0-<scale>`` plus, for a reduced covariance type, ``_cov-diag`` / ``_cov-iso``."""
+    variant = format_prior_scale_variant(float(prior_scale))
+    if str(runner).strip().lower() not in GAUSSIAN_COVARIANCE_TYPE_RUNNERS:
+        return variant
+    covariance_label = format_covariance_variant(covariance_type)
+    if covariance_label is None:
+        return variant
+    return f"{variant}_{covariance_label}"
 
 
 def _baseline_dir(
@@ -204,8 +228,10 @@ def _baseline_archive_root(
     options = dict(request.options)
     del condition_fingerprint  # Compatibility with the pre-variant helper API.
     if parameter_variant is None and model in GAUSSIAN_PRIOR_SCALE_RUNNERS:
-        parameter_variant = format_prior_scale_variant(
-            float(options.get("prior_scale", 0.1))
+        parameter_variant = compose_gaussian_parameter_variant(
+            runner=model,
+            prior_scale=float(options.get("prior_scale", 0.1)),
+            covariance_type=options.get("covariance_type"),
         )
     return build_baseline_archive_dir(
         model=model,
@@ -495,6 +521,11 @@ def _build_baseline_identity(
         runner=request.name,
         baseline_params=baseline_params,
     ) or baseline_params_to_variant(baseline_params)
+    fingerprint_params = baseline_params_to_options(baseline_params)
+    # The default covariance type is dropped from the fingerprint so that the condition ids of
+    # the full-covariance runs recorded before the reduced variants existed stay unchanged.
+    if fingerprint_params.get("covariance_type") == "full":
+        fingerprint_params.pop("covariance_type")
     payload: dict[str, Any] = {
         "model": model,
         "runner_key": request.name,
@@ -504,7 +535,7 @@ def _build_baseline_identity(
         "num_topics": int(request.num_topics),
         "category": request.category,
         "parameter_variant": parameter_variant,
-        "baseline_params": baseline_params_to_options(baseline_params),
+        "baseline_params": fingerprint_params,
         "preprocessing_variant": _build_preprocessing_variant(options),
         "train_csvs": [str(path) for path in options.get("train_csvs", []) or []],
         "test_csvs": [str(path) for path in options.get("test_csvs", []) or []],
@@ -649,13 +680,19 @@ def execute_adapter(
             infer_kwargs["params"] = params
         infer_result = infer_fn(**infer_kwargs)
 
-    persisted = persist_fn(
-        train_result=train_result,
-        infer_result=infer_result,
-        train_dir=train_dir,
-        infer_dir=infer_dir,
-        category=request.category,
-    )
+    persist_kwargs: dict[str, Any] = {
+        "train_result": train_result,
+        "infer_result": infer_result,
+        "train_dir": train_dir,
+        "infer_dir": infer_dir,
+        "category": request.category,
+    }
+    if spec.persist_passes_foldin:
+        persist_kwargs["foldin"] = bool(options.get("vmf_foldin", True))
+        persist_kwargs["condition_fingerprint"] = condition_fingerprint
+        persist_kwargs["dataset"] = request.dataset
+        persist_kwargs["data_run"] = str(options.get("data_run", "default"))
+    persisted = persist_fn(**persist_kwargs)
     metadata_path = save_metadata(
         request=request,
         runner_family=spec.runner_family,

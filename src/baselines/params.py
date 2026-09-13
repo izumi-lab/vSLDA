@@ -11,6 +11,47 @@ from src.utils.encoder_profiles import resolve_encoder_settings
 DEFAULT_PRETRAINED_WORD2VEC = "word2vec-google-news-300"
 
 
+COVARIANCE_TYPES: tuple[str, ...] = ("full", "diag", "spherical")
+_COVARIANCE_TYPE_ALIASES = {
+    "iso": "spherical",
+    "isotropic": "spherical",
+    "diagonal": "diag",
+}
+_COVARIANCE_VARIANT_LABELS = {"diag": "cov-diag", "spherical": "cov-iso"}
+
+
+def normalize_covariance_type(value: object, *, default: str = "full") -> str:
+    """Canonical covariance type of the sentence Gaussian LDA family.
+
+    ``None``/empty means the default (``full``); ``iso``/``isotropic`` map to ``spherical`` and
+    ``diagonal`` to ``diag``. Any other value raises.
+    """
+    if value is None:
+        return default
+    key = str(value).strip().lower()
+    if not key:
+        return default
+    key = _COVARIANCE_TYPE_ALIASES.get(key, key)
+    if key not in COVARIANCE_TYPES:
+        raise ValueError(
+            "covariance_type must be one of 'full', 'diag', or 'spherical' "
+            f"(aliases: 'iso', 'isotropic', 'diagonal'); got {value!r}."
+        )
+    return key
+
+
+def is_reduced_covariance(covariance_type: object) -> bool:
+    return normalize_covariance_type(covariance_type) != "full"
+
+
+def format_covariance_variant(covariance_type: object) -> str | None:
+    """Result-path label of a covariance type: ``None`` for ``full`` (paths unchanged), else
+    ``cov-diag`` / ``cov-iso``. The single definition of the label used in display keys.
+    """
+    key = normalize_covariance_type(covariance_type)
+    return _COVARIANCE_VARIANT_LABELS.get(key)
+
+
 def format_prior_scale_variant(value: float) -> str:
     scale = float(value)
     if not np.isfinite(scale) or scale <= 0.0:
@@ -25,6 +66,91 @@ def format_prior_scale_variant(value: float) -> str:
 class BleiLdaParams:
     passes: int = 20
     num_iterations: int = 50
+
+
+@dataclass(frozen=True)
+class SamParams:
+    r"""Spherical Admixture Model (Reisinger et al., ICML 2010).
+
+    The three vMF concentrations are dimension dependent: ``A_V(kappa)`` is what
+    actually controls the model, and the paper's ``kappa = 1500`` corresponds to
+    ``A_V ~ 0.09`` at its ``V = 16552``.  Each concentration may therefore be
+    given either as a raw value or, by leaving it ``None``, as a target mean
+    resultant length that is resolved against the fitted vocabulary size.
+
+    The reported ``SAM`` is the **tf** condition (runner ``sam_tf``); the tf-idf
+    condition is reported as ``SAM (tf-idf)`` (runner ``sam``).  Each runner pins
+    its own ``feature_scheme``, so this is a labelling choice, not a change to
+    either result tree.  The reason is comparability: LDA and sentLDA are fitted on
+    raw counts, and idf down-weights exactly the frequent words that NPMI also
+    penalizes, so tf-idf aligns SAM's input with the coherence metric in a way the
+    other baselines do not enjoy.  Measured across the full grid, moving SAM from
+    tf-idf to tf drops it from rank 1 to ranks 4-6 on NYT coherence at K=20..100.
+    Note this is the conservative direction for SAM: the paper's own best result is
+    tf-idf (93.3 vs 88.6 on its news-20 "different" task).
+
+    ``min_df`` / ``max_df`` default to no pruning at all so that SAM sees exactly
+    the vocabulary the other baselines see.  ``bleilda`` builds its dictionary as
+    ``gensim.corpora.Dictionary(training_data)`` with no ``filter_extremes`` call,
+    and the rest follow the shared preprocessing likewise; pruning only SAM to
+    ``min_df=5, max_df=0.5`` cut 20 Newsgroups from ``V = 44007`` to ``V = 10676``
+    and, because coherence is scored over each model's own top words, handed SAM a
+    vocabulary that no longer contains any rare term.  The resulting coherence and
+    accuracy were not comparable with the other models.  The paper's own setup does
+    prune (``V = 16552``); reproduce it by passing ``min_df`` / ``max_df``
+    explicitly rather than by changing these defaults.
+
+    ``tol`` is a relative change of the *variable* part of the bound, i.e. with
+    ``D * log c_V(kappa)`` subtracted.  That term is a constant while ``kappa`` is
+    fixed and dwarfs everything else (``3.82e8`` against a ``1.3e6`` span at 20
+    Newsgroups), so judging convergence on the raw bound measures the constant
+    rather than the fit.
+
+    The default was picked from a planted-topic recovery sweep, where topic
+    directions and document proportions saturate at ``1e-5``:
+
+    ==========  ======  ============  ==========
+    tol         iters   mean \|cos\|   Spearman
+    ==========  ======  ============  ==========
+    1e-3             6        0.9806      0.8866
+    1e-4            16        0.9960      0.9408
+    **1e-5**        35        0.9998      0.9822
+    1e-6            50        0.9999      0.9897
+    ==========  ======  ============  ==========
+
+    ``xi`` is the one that must not be guessed.  ``E_q[phi_t] = A_V(xi) mutilde_t``,
+    so a small ``A_V(xi)`` shrinks every topic direction out of the likelihood and
+    the bound is then maximized by collapsing all topics onto the corpus mean and
+    spreading ``alphatilde`` to shrink ``S_d``.  Measured on a planted-topic
+    recovery task, ``A_V(xi) = 0.05`` recovers nothing (mean ``|cos| = 0.50``,
+    exactly the collapsed value) while ``A_V(xi) >= 0.9`` recovers essentially
+    perfectly (``>= 0.993``).  Hence the default below, and hence ``kappa0`` stays
+    small so the sharp topic prior does not also pull the topics together.
+    """
+
+    feature_scheme: str = "tfidf"
+    min_df: int = 1
+    max_df: float = 1.0
+    max_vocabulary_size: int | None = None
+    sublinear_tf: bool = False
+    kappa: float | None = None
+    kappa_mean_resultant: float = 0.1
+    xi: float | None = None
+    xi_mean_resultant: float = 0.99
+    kappa0: float | None = None
+    kappa0_mean_resultant: float = 0.01
+    alpha: float = 1.0
+    num_iterations: int = 200
+    alpha_steps: int = 20
+    mu_steps: int = 5
+    alpha_step_size: float = 0.1
+    mu_step_size: float = 0.1
+    tol: float = 1e-5
+    infer_num_iterations: int = 100
+    optimize_kappa: bool = False
+    require_convergence: bool = False
+    init: str = "corpus_random"
+    random_state: int | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +258,7 @@ class SentenceGaussianLdaParams:
     preencode_corpus: bool = True
     soft_temperature: float = 1.0
     prior_scale: float = 0.1
+    covariance_type: str = "full"
 
 
 @dataclass(frozen=True)
@@ -273,6 +400,7 @@ BaselineParams = (
     | SphericalKMeansParams
     | GaussianKMeansParams
     | MvTMParams
+    | SamParams
     | EtmParams
     | MovMFParams
     | GaussianMixtureParams
@@ -285,6 +413,107 @@ def parse_bleilda_params(options: dict[str, Any]) -> BleiLdaParams:
         passes=int(options.get("passes", 20)),
         num_iterations=int(options.get("num_iterations", 50)),
     )
+
+
+def _positive_float(options: dict[str, Any], key: str, *, default: float) -> float:
+    value = float(options.get(key, default))
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"sam params.{key} must be finite and > 0.")
+    return value
+
+
+def _optional_positive_float(options: dict[str, Any], key: str) -> float | None:
+    if options.get(key) is None:
+        return None
+    value = float(options[key])
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"sam params.{key} must be finite and > 0.")
+    return value
+
+
+def _unit_interval(options: dict[str, Any], key: str, *, default: float) -> float:
+    value = float(options.get(key, default))
+    if not np.isfinite(value) or not 0.0 < value < 1.0:
+        raise ValueError(f"sam params.{key} must lie strictly between 0 and 1.")
+    return value
+
+
+def parse_sam_params(options: dict[str, Any]) -> SamParams:
+    feature_scheme = str(options.get("feature_scheme", "tfidf")).strip().lower()
+    if feature_scheme not in {"tfidf", "tf"}:
+        raise ValueError("sam params.feature_scheme must be 'tfidf' or 'tf'.")
+
+    min_df = int(options.get("min_df", 1))
+    if min_df < 1:
+        raise ValueError("sam params.min_df must be >= 1.")
+    max_df = float(options.get("max_df", 1.0))
+    if not np.isfinite(max_df) or not 0.0 < max_df <= 1.0:
+        raise ValueError("sam params.max_df must lie in (0, 1].")
+
+    num_iterations = int(options.get("num_iterations", 200))
+    if num_iterations <= 0:
+        raise ValueError("sam params.num_iterations must be > 0.")
+    alpha_steps = int(options.get("alpha_steps", 20))
+    if alpha_steps <= 0:
+        raise ValueError("sam params.alpha_steps must be > 0.")
+    mu_steps = int(options.get("mu_steps", 5))
+    if mu_steps <= 0:
+        raise ValueError("sam params.mu_steps must be > 0.")
+    infer_num_iterations = int(options.get("infer_num_iterations", 100))
+    if infer_num_iterations <= 0:
+        raise ValueError("sam params.infer_num_iterations must be > 0.")
+
+    init = str(options.get("init", "corpus_random")).strip().lower()
+    if init not in {"corpus_random", "random"}:
+        raise ValueError("sam params.init must be 'corpus_random' or 'random'.")
+
+    return SamParams(
+        feature_scheme=feature_scheme,
+        min_df=min_df,
+        max_df=max_df,
+        max_vocabulary_size=_optional_positive_int(options, "max_vocabulary_size"),
+        sublinear_tf=_bool_option(options, "sublinear_tf", default=False),
+        kappa=(
+            _optional_positive_float(options, "kappa") if "kappa" in options else None
+        ),
+        kappa_mean_resultant=_unit_interval(
+            options, "kappa_mean_resultant", default=0.1
+        ),
+        xi=_optional_positive_float(options, "xi"),
+        xi_mean_resultant=_unit_interval(options, "xi_mean_resultant", default=0.99),
+        kappa0=_optional_positive_float(options, "kappa0"),
+        kappa0_mean_resultant=_unit_interval(
+            options, "kappa0_mean_resultant", default=0.01
+        ),
+        alpha=_positive_float(options, "alpha", default=1.0),
+        num_iterations=num_iterations,
+        alpha_steps=alpha_steps,
+        mu_steps=mu_steps,
+        alpha_step_size=_positive_float(options, "alpha_step_size", default=0.1),
+        mu_step_size=_positive_float(options, "mu_step_size", default=0.1),
+        tol=_positive_float(options, "tol", default=1e-5),
+        infer_num_iterations=infer_num_iterations,
+        optimize_kappa=_bool_option(options, "optimize_kappa", default=False),
+        require_convergence=_bool_option(options, "require_convergence", default=False),
+        init=init,
+        random_state=_optional_int(options.get("random_state")),
+    )
+
+
+def parse_sam_tf_params(options: dict[str, Any]) -> SamParams:
+    """``sam_tf``: SAM on L2-normalized term frequencies instead of tf-idf.
+
+    The paper reports tf and tf-idf as two conditions ("l2-normalized tf or
+    tf-idf document representations") and the gap between them is large, so the
+    tf variant is a separate runner rather than a parameter: two runners give two
+    result trees, whereas one runner with a parameter would collide on the same
+    display key.  Everything except the default ``feature_scheme`` is shared with
+    :func:`parse_sam_params`; an explicit ``feature_scheme`` is still honoured.
+    """
+
+    merged = dict(options)
+    merged.setdefault("feature_scheme", "tf")
+    return parse_sam_params(merged)
 
 
 def _optional_str(options: dict[str, Any], key: str) -> str | None:
@@ -554,12 +783,20 @@ def parse_sentence_gaussianlda_params(
         preencode_corpus=bool(options.get("preencode_corpus", True)),
         soft_temperature=float(options.get("soft_temperature", 1.0)),
         prior_scale=float(options.get("prior_scale", 0.1)),
+        covariance_type=_parse_covariance_type(options.get("covariance_type")),
     )
     if not np.isfinite(params.prior_scale) or params.prior_scale <= 0.0:
         raise ValueError(
             "sentence_gaussianlda params.prior_scale must be finite and > 0."
         )
     return params
+
+
+def _parse_covariance_type(value: object) -> str:
+    try:
+        return normalize_covariance_type(value)
+    except ValueError as exc:
+        raise ValueError(f"sentence_gaussianlda params.{exc}") from exc
 
 
 def parse_sentlda_params(options: dict[str, Any]) -> SentLdaParams:
@@ -756,6 +993,10 @@ def normalize_baseline_params(
 
     if runner_key == "bleilda":
         return parse_bleilda_params(raw)
+    if runner_key == "sam":
+        return parse_sam_params(raw)
+    if runner_key == "sam_tf":
+        return parse_sam_tf_params(raw)
     if runner_key == "ctm":
         return parse_ctm_params(raw)
     if runner_key == "senclu":
@@ -807,6 +1048,7 @@ def baseline_params_to_variant(params: BaselineParams | None) -> str:
         "tokenizer_kwargs": {},
         "normalize_embeddings": None,
         "truncate_dim": None,
+        "covariance_type": "full",
     }
     if isinstance(params, (CtmParams, SenCluParams)):
         omit_defaults["encode_batch_size"] = 128

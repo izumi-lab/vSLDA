@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -72,6 +72,12 @@ class VmfRequestOptions:
     avg_log_likelihood_every: int
     invariant_check_every: int
     soft_temperature: float
+    # SAEM with the exact kappa root is the default; saem_burn_in None = plain MCEM.
+    saem_burn_in: int | None = 5
+    write_foldin: bool = True
+    condition_fingerprint: str | None = None
+    saem_decay: float = 1.0
+    kappa_solver: str = "newton"
 
     @classmethod
     def from_request_options(cls, options: dict[str, Any]) -> "VmfRequestOptions":
@@ -129,6 +135,24 @@ class VmfRequestOptions:
             avg_log_likelihood_every=options.get("avg_log_likelihood_every", 1),
             invariant_check_every=options.get("invariant_check_every", 1),
             soft_temperature=float(options.get("soft_temperature", 1.0)),
+            # A missing key means the default SAEM; an explicit None the plain MCEM.
+            saem_burn_in=(
+                cls.saem_burn_in
+                if "saem_burn_in" not in options
+                else (
+                    None
+                    if options["saem_burn_in"] is None
+                    else int(options["saem_burn_in"])
+                )
+            ),
+            saem_decay=float(options.get("saem_decay", cls.saem_decay)),
+            kappa_solver=str(options.get("kappa_solver", cls.kappa_solver)),
+            write_foldin=bool(options.get("write_foldin", True)),
+            condition_fingerprint=(
+                None
+                if options.get("condition_fingerprint") in (None, "")
+                else str(options["condition_fingerprint"])
+            ),
         )
 
 
@@ -161,6 +185,109 @@ def _load_preprocessed_corpus_many(
         ja_require_unidic=ja_require_unidic,
     )
     return select_modelable_documents(documents, raw_doc_indices=raw_indices)
+
+
+def _training_encoder_fingerprint(options: VmfRequestOptions) -> str:
+    """The sentence-encoder fingerprint of the run, as the post-hoc fold-in computes it.
+
+    ``metadata.json`` records the encoder configuration the experiment runner builds
+    from the same settings; the fingerprint reads the same fields, so a fold-in written
+    here and one written later by ``evaluation vmf-foldin-theta`` share their identity.
+    """
+
+    from src.evaluation.topic_pairs.inputs import encoder_fingerprint
+
+    return encoder_fingerprint(
+        {
+            "model_name": options.encoder_name,
+            "backend": options.encoder_backend,
+            "pooling": options.encoder_pooling,
+            "encode_prefix": options.encoder_prefix,
+            "encode_prompt": options.encoder_prompt,
+            "encode_prompt_name": options.encoder_prompt_name,
+            "truncate_dim": options.encoder_truncate_dim,
+            "strip_terminal_normalize": options.encoder_strip_terminal_normalize,
+            "normalize_embeddings": options.encoder_normalize_embeddings,
+            "model_kwargs": options.encoder_model_kwargs,
+            "tokenizer_kwargs": options.encoder_tokenizer_kwargs,
+        }
+    )
+
+
+def _write_training_foldin(
+    *,
+    trainer: VMFLDATrainer,
+    options: VmfRequestOptions,
+    request: ModelRunRequest,
+    documents_by_split: Mapping[str, Sequence[Any]],
+    encoded_by_split: Mapping[str, Sequence[np.ndarray]],
+) -> dict[str, Path]:
+    """Write the collapsed fold-in theta of both splits into the run directory.
+
+    The sentence log likelihoods come straight from the trainer (its encoded corpora
+    are already transformed and normalized), the sampler and the artifacts are those
+    of ``evaluation vmf-foldin-theta`` (:mod:`src.evaluation.foldin.artifacts`), and
+    the fingerprint is built from the same inputs, so the post-hoc command recognizes
+    these artifacts as current and skips the run.
+    """
+
+    from src.evaluation.foldin.artifacts import (
+        compute_foldin_from_likelihoods,
+        write_foldin_artifacts,
+    )
+    from src.evaluation.topic_pairs.inputs import sentence_fingerprint
+    from src.evaluation.word_based.sentence_encoding import flatten_encoder_sentences
+
+    encoder_fp = _training_encoder_fingerprint(options)
+    condition_fp = options.condition_fingerprint or ""
+    alpha = np.asarray(trainer.alpha, dtype=np.float64)
+    artifacts: dict[str, Path] = {}
+    for split, documents in documents_by_split.items():
+        started = time.perf_counter()
+        sentences, _offsets = flatten_encoder_sentences(documents, use_tokenized=False)
+        likelihoods: list[np.ndarray] = []
+        for encoded in encoded_by_split[split]:
+            enc = np.asarray(encoded, dtype=np.float64)
+            if enc.size == 0:
+                likelihoods.append(np.zeros((0, trainer.num_topics), dtype=np.float64))
+                continue
+            if enc.ndim == 1:
+                enc = enc.reshape(1, -1)
+            likelihoods.append(
+                np.asarray(
+                    trainer.inferencer._log_likelihood_batch(enc), dtype=np.float64
+                )
+            )
+        if len(likelihoods) != len(documents):
+            raise RuntimeError(
+                f"{split}: {len(likelihoods)} encoded documents for {len(documents)} documents"
+            )
+        result = compute_foldin_from_likelihoods(
+            likelihoods,
+            alpha,
+            split=split,
+            encoder_fp=encoder_fp,
+            corpus_sha1=sentence_fingerprint(sentences),
+            condition_fp=condition_fp,
+            dataset=request.dataset,
+            data_run=str(dict(request.options).get("data_run", "default")),
+            category=request.category,
+            encoder_model_name=options.encoder_name,
+            extra_metadata={"written_by": "training"},
+            timing={"log_likelihood_sec": time.perf_counter() - started},
+        )
+        written = write_foldin_artifacts(options.output_dir, result=result)
+        artifacts.update(
+            {key: options.output_dir / name for key, name in written.items()}
+        )
+        options.logger.info(
+            "fold-in %s: %d documents x %d topics in %.1fs",
+            split,
+            result.num_documents,
+            result.num_topics,
+            time.perf_counter() - started,
+        )
+    return artifacts
 
 
 def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
@@ -223,6 +350,9 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
         pre_normalize_transform=options.encoder_pre_normalize_transform,
         whitening_eps=options.encoder_whitening_eps,
         algorithm_variant=options.algorithm_variant,
+        saem_burn_in=options.saem_burn_in,
+        saem_decay=options.saem_decay,
+        kappa_solver=options.kappa_solver,
         save_path=options.output_dir,
         log=options.logger,
     )
@@ -255,8 +385,12 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
 
     counts_test_start = time.perf_counter()
     options.logger.info("Running test corpus inference")
-    test_inference = trainer.infer_corpus_topic_outputs(
-        test_corpus,
+    # Encoded once: the soft inference below and the fold-in of the test split share it.
+    encoded_test_corpus = [
+        trainer.inferencer.encode_document(doc) for doc in test_corpus
+    ]
+    test_inference = trainer.infer_encoded_corpus_topic_outputs(
+        encoded_test_corpus,
         temperature=options.soft_temperature,
         include_counts=True,
         include_sentence_posteriors=True,
@@ -327,7 +461,20 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
                 "num_iterations": options.num_iterations,
                 "gibbs_sweeps": options.gibbs_sweeps,
                 "num_samples": options.num_samples,
+                "kappa_default": float(options.kappa_default),
+                "alpha_init": (
+                    None
+                    if options.alpha is None
+                    else (
+                        [float(value) for value in options.alpha]
+                        if isinstance(options.alpha, (list, tuple))
+                        else float(options.alpha)
+                    )
+                ),
                 "alpha_min_value": options.alpha_min_value,
+                "saem_burn_in": options.saem_burn_in,
+                "saem_decay": options.saem_decay,
+                "kappa_solver": options.kappa_solver,
                 "repair_empty_topics": options.repair_empty_topics,
                 "min_topic_count_for_repair": options.min_topic_count_for_repair,
                 "avg_log_likelihood_every": options.avg_log_likelihood_every,
@@ -371,6 +518,19 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
         },
         selection_path,
     )
+    foldin_artifacts: dict[str, Path] = {}
+    if options.write_foldin:
+        options.logger.info("Writing collapsed fold-in document-topic distributions")
+        foldin_artifacts = _write_training_foldin(
+            trainer=trainer,
+            options=options,
+            request=request,
+            documents_by_split={"train": train_preprocessed, "test": test_preprocessed},
+            encoded_by_split={
+                "train": trainer.encoded_corpus,
+                "test": encoded_test_corpus,
+            },
+        )
 
     extras = {
         "metrics_path": saved_outputs["metrics_path"],
@@ -384,6 +544,7 @@ def _run_vmf_request(request: ModelRunRequest) -> ModelArtifacts:
     }
     if counts_train is not None:
         extras["counts"] = saved_outputs["table_counts_per_doc"]
+    extras.update(foldin_artifacts)
 
     return ModelArtifacts(
         train_path=saved_outputs["doc_topic_train"],

@@ -92,6 +92,7 @@ def _make_trainer(
     dim: int = 3,
     kappa: float = 2.0,
     max_kappa: float = 10_000.0,
+    kappa_solver: str = "newton",
 ) -> VMFLDATrainer:
     mapping = {
         "a": _normalize(np.array([1.0, 0.0, 0.0])),
@@ -107,6 +108,7 @@ def _make_trainer(
         max_kappa=max_kappa,
         num_components=num_components,
         pre_normalize_transform="none",
+        kappa_solver=kappa_solver,
         log=logging.getLogger("test-vmf-algorithm"),
         progress=NullProgressReporter(),
     )
@@ -400,7 +402,8 @@ def test_alpha_fixed_point_update_matches_one_manual_iteration() -> None:
 
 
 def test_m_step_updates_parameters_from_fixed_sufficient_statistics() -> None:
-    trainer = _make_trainer(num_topics=2, num_components=2)
+    # the expected kappa below is the Banerjee approximation
+    trainer = _make_trainer(num_topics=2, num_components=2, kappa_solver="banerjee")
     nk = np.array([4.0, 3.0], dtype=np.float64)
     nk_comp = np.array(
         [
@@ -503,6 +506,9 @@ def test_mixture_vmf_sentence_lda_small_golden_output() -> None:
         kappa=1.0,
         num_components=2,
         pre_normalize_transform="none",
+        # the golden values were recorded with the plain MCEM and the Banerjee kappa
+        saem_burn_in=None,
+        kappa_solver="banerjee",
         log=logging.getLogger("test-vmf-mixture-golden"),
         progress=NullProgressReporter(),
     )

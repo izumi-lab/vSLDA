@@ -5,7 +5,7 @@ from typing import Literal
 
 import numpy as np
 
-from src.baselines.params import format_prior_scale_variant
+from src.baselines.adapter_runtime import compose_gaussian_parameter_variant
 from src.core.artifacts import (
     METADATA_FILENAME,
     load_artifact_json,
@@ -37,6 +37,8 @@ ModelType = Literal[
     "gaussian_kmeans",
     "movmf",
     "gaussian_mixture",
+    "sam",
+    "sam_tf",
 ]
 
 MODEL_ALIASES = {"gaussian": "sentence_gaussianlda"}
@@ -49,6 +51,8 @@ MODEL_CHOICES = [
     "gaussianlda",
     "etm",
     "ctm",
+    "sam",
+    "sam_tf",
 ]
 ANALYSIS_ROOT = RESULTS_ROOT / "topic_analysis"
 DEFAULT_OUT_ROOT = ANALYSIS_ROOT / "coherence"
@@ -72,7 +76,7 @@ def effective_embedding_variant(
     if not variant:
         return None
     if model == "sentence_gaussianlda" and not variant.endswith(("_raw", "_norm")):
-        return f"{variant}_raw"
+        return f"{variant}_norm"
     return variant
 
 
@@ -88,7 +92,9 @@ def build_result_dir(
     category: str,
     data_run: str = "default",
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> Path:
+    """``vmf_variant`` is the hyperparameter label of the vMF runs (None = default runs)."""
     if model == "vmf":
         return resolve_vmf_experiment_dir(
             dataset=dataset,
@@ -97,6 +103,7 @@ def build_result_dir(
             category=category,
             run_name=data_run,
             embedding_variant=effective_embedding_variant(model, embedding_variant),
+            parameter_variant=vmf_variant,
         )
     raise ValueError(f"Unsupported model in vmf result path resolver: '{model}'.")
 
@@ -110,6 +117,7 @@ def build_baseline_param_dir(
     data_run: str = "default",
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
 ) -> Path:
     if model not in {
         "bleilda",
@@ -125,6 +133,8 @@ def build_baseline_param_dir(
         "gaussian_kmeans",
         "movmf",
         "gaussian_mixture",
+        "sam",
+        "sam_tf",
     }:
         raise ValueError(f"Unsupported model in baseline path resolver: '{model}'.")
     return (
@@ -137,7 +147,11 @@ def build_baseline_param_dir(
             data_run=data_run,
             embedding_variant=effective_embedding_variant(model, embedding_variant),
             parameter_variant=(
-                format_prior_scale_variant(prior_scale)
+                compose_gaussian_parameter_variant(
+                    runner=model,
+                    prior_scale=prior_scale,
+                    covariance_type=covariance_type,
+                )
                 if prior_scale is not None
                 and model in {"gaussianlda", "sentence_gaussianlda"}
                 else None
@@ -157,6 +171,8 @@ def resolve_model_provenance(
     data_run: str = "default",
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> dict[str, object]:
     if model == "vmf":
         return load_model_provenance(
@@ -168,6 +184,7 @@ def resolve_model_provenance(
                 category=category,
                 data_run=data_run,
                 embedding_variant=embedding_variant,
+                vmf_variant=vmf_variant,
             ),
             model_key="vmf_sentence_lda",
         )
@@ -181,6 +198,7 @@ def resolve_model_provenance(
             data_run=data_run,
             embedding_variant=embedding_variant,
             prior_scale=prior_scale,
+            covariance_type=covariance_type,
         ),
         model_key=model,
     )
@@ -204,6 +222,8 @@ def _load_result_metadata(
     category: str,
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> dict[str, object]:
     if model == "vmf":
         result_dir = build_result_dir(
@@ -214,6 +234,7 @@ def _load_result_metadata(
             category,
             data_run=data_run,
             embedding_variant=embedding_variant,
+            vmf_variant=vmf_variant,
         )
     else:
         try:
@@ -226,6 +247,7 @@ def _load_result_metadata(
                 data_run=data_run,
                 embedding_variant=embedding_variant,
                 prior_scale=prior_scale,
+                covariance_type=covariance_type,
             )
         except MissingArtifactError:
             return {}
@@ -247,6 +269,8 @@ def resolve_split_csvs_and_target_column(
     split: str,
     embedding_variant: str | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> tuple[tuple[str, ...] | None, str]:
     payload = _load_result_metadata(
         model=model,
@@ -257,6 +281,8 @@ def resolve_split_csvs_and_target_column(
         category=category,
         embedding_variant=embedding_variant,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
     key = "train_csvs" if split == "train" else "test_csvs"
     raw_paths = payload.get(key)
@@ -277,6 +303,7 @@ def load_doc_topics(
     split: str,
     prefer_soft: bool = False,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> np.ndarray:
     if model == "vmf":
         result_dir = build_result_dir(
@@ -287,6 +314,7 @@ def load_doc_topics(
             category,
             data_run=data_run,
             embedding_variant=embedding_variant,
+            vmf_variant=vmf_variant,
         )
         soft_path = build_vmf_doc_topic_path(
             dataset=dataset,
@@ -387,6 +415,7 @@ def load_doc_topics_proxy_soft_preferred(
     category: str,
     split: str,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> np.ndarray:
     try:
         return load_doc_topics(
@@ -399,6 +428,7 @@ def load_doc_topics_proxy_soft_preferred(
             split=split,
             prefer_soft=True,
             embedding_variant=embedding_variant,
+            vmf_variant=vmf_variant,
         )
     except FileNotFoundError:
         sentence_topics_by_doc = load_sentence_topics(
@@ -410,6 +440,7 @@ def load_doc_topics_proxy_soft_preferred(
             category=category,
             split=split,
             embedding_variant=embedding_variant,
+            vmf_variant=vmf_variant,
         )
         return aggregate_doc_topics_from_sentence_topics(
             sentence_topics_by_doc=sentence_topics_by_doc,
@@ -426,6 +457,7 @@ def resolve_sentence_topics_path(
     category: str,
     split: str,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> Path:
     if model == "vmf":
         result_dir = build_result_dir(
@@ -436,6 +468,7 @@ def resolve_sentence_topics_path(
             category,
             data_run=data_run,
             embedding_variant=embedding_variant,
+            vmf_variant=vmf_variant,
         )
         return result_dir / f"sentence_topic_{split}_soft.pkl"
     condition_dir = resolve_baseline_condition_dir(
@@ -485,6 +518,7 @@ def load_sentence_topics(
     category: str,
     split: str,
     embedding_variant: str | None = None,
+    vmf_variant: str | None = None,
 ) -> list[np.ndarray]:
     path = resolve_sentence_topics_path(
         model=model,
@@ -495,8 +529,23 @@ def load_sentence_topics(
         category=category,
         split=split,
         embedding_variant=embedding_variant,
+        vmf_variant=vmf_variant,
     )
     raw = load_artifact_pickle(path)
+    return normalize_sentence_topic_payload(raw, num_topics=num_topics, path=path)
+
+
+def normalize_sentence_topic_payload(
+    raw: object,
+    *,
+    num_topics: int,
+    path: Path | str = "<memory>",
+) -> list[np.ndarray]:
+    """Normalize a persisted sentence-topic payload to one ``(S_d, K)`` array per doc.
+
+    Accepts a 3D ndarray, a list/tuple of 2D arrays, or 1D integer hard
+    assignments (expanded to one-hot rows). Rows are re-normalized to sum to 1.
+    """
     if isinstance(raw, np.ndarray):
         if raw.ndim != 3:
             raise ValueError(

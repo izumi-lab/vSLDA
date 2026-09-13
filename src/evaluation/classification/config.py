@@ -22,6 +22,8 @@ TARGETS: Dict[str, Dict[str, List[str]]] = DATASET_TARGETS
 
 MODEL_NAMES = [
     "Blei LDA",
+    "SAM",
+    "SAM (tf-idf)",
     "sentLDA",
     "Gaussian k-means",
     "Spherical k-means",
@@ -39,6 +41,8 @@ MODEL_NAMES = [
 
 MODEL_TABLE_LABELS = {
     "Blei LDA": "LDA",
+    "SAM": "SAM",
+    "SAM (tf-idf)": "SAM (tf-idf)",
     "sentLDA": "SentLDA",
     "Gaussian k-means": "GCLU",
     "Spherical k-means": "SCLU",

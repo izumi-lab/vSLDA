@@ -9,6 +9,8 @@ from .classification import (
 from .diagnostics.cross_model_pair_diagnostics import run_cross_model_pair_diagnostics
 from .diagnostics.sentence_topic_inspection import run_sentence_topic_inspection
 from .diagnostics.topic_count_diagnostics import run_topic_count_diagnostics
+from .entropy_based.metrics import run_entropy_based_metrics
+from .entropy_based.summary import run_entropy_based_summary
 from .geometry_based.metrics import run_geometry_based_metrics
 from .registry import (
     get_task,
@@ -20,6 +22,7 @@ from .registry import (
 )
 from .word_based.label_profile import run_word_based_label_profile
 from .word_based.metrics import run_word_based_metrics
+from .word_based.summary import run_word_based_summary
 from .word_based.topic_word_table import run_word_based_topic_word_table
 
 run_topic_overlap_analysis = run_geometry_based_metrics
@@ -36,7 +39,10 @@ __all__ = [
     "write_classification_summary",
     "write_summary",
     "run_geometry_based_metrics",
+    "run_entropy_based_metrics",
+    "run_entropy_based_summary",
     "run_word_based_metrics",
+    "run_word_based_summary",
     "run_topic_count_diagnostics",
     "run_word_based_label_profile",
     "run_word_based_topic_word_table",

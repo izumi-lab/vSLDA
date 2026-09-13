@@ -28,7 +28,7 @@ from src.utils.logging import get_logger
 
 ModelName = Literal["vmf_sentence_lda", "bleilda"]
 SplitName = Literal["train", "test"]
-VmfAssignment = Literal["soft", "hard"]
+VmfAssignment = Literal["soft", "hard", "foldin", "foldincounts"]
 
 LOGGER = get_logger(__name__)
 
@@ -476,7 +476,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sort-by", choices=["ratio", "pmi"], default="ratio")
     parser.add_argument("--pmi-eps", type=float, default=1e-12)
     parser.add_argument("--min-docs-per-label", type=int, default=1)
-    parser.add_argument("--vmf-assignment", choices=["soft", "hard"], default="soft")
+    parser.add_argument(
+        "--vmf-assignment",
+        choices=["soft", "hard", "foldin", "foldincounts"],
+        default="soft",
+    )
     parser.add_argument("--data-run", default="default")
     parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--data-column", default="data")

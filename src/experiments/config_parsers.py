@@ -12,6 +12,9 @@ from src.utils.encoder_profiles import resolve_encoder_settings
 from src.utils.random import DEFAULT_RANDOM_SEED
 
 from .config_schema import (
+    DEFAULT_KAPPA_SOLVER,
+    DEFAULT_SAEM_BURN_IN,
+    DEFAULT_SAEM_DECAY,
     BaselineConfig,
     DatasetConfig,
     EncoderConfig,
@@ -185,7 +188,28 @@ def parse_train_config(raw_cfg: Dict[str, Any]) -> TrainConfig:
         min_topic_count_for_repair=int(train_cfg.get("min_topic_count_for_repair", 1)),
         avg_log_likelihood_every=int(train_cfg.get("avg_log_likelihood_every", 1)),
         invariant_check_every=int(train_cfg.get("invariant_check_every", 1)),
+        # A missing key means the default SAEM; an explicit null means the plain MCEM.
+        saem_burn_in=(
+            DEFAULT_SAEM_BURN_IN
+            if "saem_burn_in" not in train_cfg
+            else (
+                None
+                if train_cfg["saem_burn_in"] is None
+                else int(train_cfg["saem_burn_in"])
+            )
+        ),
+        saem_decay=float(train_cfg.get("saem_decay", DEFAULT_SAEM_DECAY)),
+        kappa_solver=str(train_cfg.get("kappa_solver", DEFAULT_KAPPA_SOLVER)),
+        hyperparameter_overrides=tuple(
+            str(key)
+            for key in ensure_list(train_cfg.get("hyperparameter_overrides") or [])
+        ),
     )
+    if train.hyperparameter_overrides and train.num_samples > train.gibbs_sweeps:
+        raise ValueError(
+            "train.num_samples (B) must be <= train.gibbs_sweeps (zeta) when either is "
+            f"overridden; got B={train.num_samples}, zeta={train.gibbs_sweeps}."
+        )
     if train.num_components < 1:
         raise ValueError("train.num_components must be >= 1.")
     if not np.isfinite(train.max_kappa) or train.max_kappa <= 0.0:
@@ -202,6 +226,12 @@ def parse_train_config(raw_cfg: Dict[str, Any]) -> TrainConfig:
         raise ValueError("train.avg_log_likelihood_every must be >= 1.")
     if train.invariant_check_every < 1:
         raise ValueError("train.invariant_check_every must be >= 1.")
+    if train.saem_burn_in is not None and train.saem_burn_in < 0:
+        raise ValueError("train.saem_burn_in must be >= 0 or null.")
+    if not (0.5 < train.saem_decay <= 1.0):
+        raise ValueError("train.saem_decay must lie in (1/2, 1].")
+    if train.kappa_solver not in {"banerjee", "newton"}:
+        raise ValueError("train.kappa_solver must be 'banerjee' or 'newton'.")
     return train
 
 
@@ -396,7 +426,8 @@ def parse_vmf_config(raw_cfg: Dict[str, Any]) -> VmfConfig:
     vmf_inference_cfg = vmf_cfg.get("inference", {})
     return VmfConfig(
         inference=VmfInferenceConfig(
-            soft_temperature=float(vmf_inference_cfg.get("soft_temperature", 1.0))
+            soft_temperature=float(vmf_inference_cfg.get("soft_temperature", 1.0)),
+            foldin=bool(vmf_inference_cfg.get("foldin", True)),
         )
     )
 
@@ -463,6 +494,52 @@ def _baseline_params_with_encoder_defaults(
     return options
 
 
+def expand_baseline_companions(
+    raw_baselines: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Append registry companion runners so configs need not spell them out.
+
+    A companion (``sam`` -> ``sam_tf``) is inserted right after its parent and
+    inherits the parent's params, so tuning applied to the parent applies to both
+    conditions.  Explicitly configured entries always win: if the companion is
+    already listed anywhere, nothing is added.
+    """
+
+    # RUNNERS is indexed directly rather than through get_runner_spec: companion
+    # keys are already registry keys, and get_runner_spec would apply the alias,
+    # turning the tf-idf companion key "sam" back into the tf runner.
+    from src.baselines.registry import RUNNERS, companion_runners, resolve_runner_name
+
+    resolved_baselines: list[Dict[str, Any]] = []
+    for baseline in raw_baselines:
+        entry = dict(baseline)
+        entry["runner"] = resolve_runner_name(str(entry.get("runner", "")).strip())
+        resolved_baselines.append(entry)
+    raw_baselines = resolved_baselines
+
+    configured = {str(baseline.get("runner", "")).strip() for baseline in raw_baselines}
+    expanded: list[Dict[str, Any]] = []
+    for baseline in raw_baselines:
+        expanded.append(baseline)
+        params = baseline.get("params") or {}
+        for companion in companion_runners(str(baseline.get("runner", "")).strip()):
+            if companion.key in configured:
+                continue
+            configured.add(companion.key)
+            expanded.append(
+                {
+                    "name": RUNNERS[companion.key].display_name,
+                    "runner": companion.key,
+                    "params": {
+                        key: value
+                        for key, value in params.items()
+                        if key not in companion.inherit_params_except
+                    },
+                }
+            )
+    return expanded
+
+
 def parse_baselines(
     raw_cfg: Dict[str, Any],
     *,
@@ -482,7 +559,9 @@ def parse_baselines(
                 ),
             ),
         )
-        for baseline in raw_cfg.get("baselines", [])
+        for baseline in expand_baseline_companions(
+            list(raw_cfg.get("baselines", []) or [])
+        )
     ]
 
 

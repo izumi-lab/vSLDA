@@ -4,18 +4,18 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Sequence
 
 import numpy as np
 from gensim.corpora import Dictionary
 from gensim.models.ldamodel import LdaModel
 
+from src.baselines.adapter_runtime import compose_gaussian_parameter_variant
 from src.baselines.models.gaussian_helpers import load_gaussianlda_model
 from src.baselines.models.sentence_gaussian_helpers import (
     build_sentence_gaussian_encoder,
     load_sentence_gaussianlda_model,
 )
-from src.baselines.params import format_prior_scale_variant
 from src.core.artifacts import (
     load_artifact_json,
     load_artifact_pickle,
@@ -40,6 +40,7 @@ from src.evaluation.word_based.topic_assignment import (
     compute_etm_expected_counts,
     compute_etm_token_topic_posterior_mean,
     compute_expected_topic_word_counts,
+    compute_sam_expected_counts,
     rank_topic_words,
     run_collapsed_fold_in,
     topic_word_probabilities,
@@ -552,6 +553,114 @@ def _encoder_from_metadata(
     return encoder, batch_size
 
 
+def vmf_sentence_log_likelihoods(
+    *,
+    condition_dir: Path,
+    encoded_documents: Iterable[np.ndarray],
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Frozen vMF-mixture sentence log likelihoods, one ``(S_d, K)`` block per document.
+
+    ``encoded_documents`` yields the raw encoder output of each document's
+    sentences in corpus order; the training-time embedding transform and L2
+    normalisation are applied here, so callers may pass cached raw embeddings.
+    Returns the per-document blocks and the document-level Dirichlet ``alpha``
+    the collapsed fold-in needs.
+    """
+
+    params = load_artifact_json(condition_dir / "params.json")
+    preprocessor = _vmf_embedding_preprocessor(condition_dir, params)
+    weights = np.asarray(
+        load_artifact_pickle(condition_dir / "mixture_weights.pkl"), dtype=np.float64
+    )
+    means = np.asarray(
+        load_artifact_pickle(condition_dir / "component_means.pkl"), dtype=np.float64
+    )
+    kappa = np.asarray(
+        load_artifact_pickle(condition_dir / "kappa_per_topic.pkl"), dtype=np.float64
+    )
+    likelihoods: list[np.ndarray] = []
+    for encoded_view in encoded_documents:
+        encoded = np.asarray(encoded_view, dtype=np.float64)
+        encoded = preprocessor.transform(encoded)
+        if encoded.shape[0]:
+            norms = np.linalg.norm(encoded, axis=1, keepdims=True)
+            if np.any(norms <= 0.0):
+                raise ValueError("vMF encoder produced a zero vector")
+            encoded = encoded / norms
+        likelihoods.append(
+            vmf_mixture_log_likelihood(
+                encoded,
+                mixture_weights=weights,
+                component_means=means,
+                kappa_per_topic=kappa,
+            )
+        )
+    return likelihoods, _alpha_vector(params["alpha"], means.shape[0])
+
+
+def sentlda_sentence_log_likelihoods(
+    *,
+    condition_dir: Path,
+    documents: Sequence[PreprocessedDocument],
+) -> tuple[list[np.ndarray], np.ndarray, set[str]]:
+    """Frozen SentLDA sentence predictive log likelihoods per document.
+
+    Returns the per-document ``(S_d, K)`` blocks, the Dirichlet ``alpha`` and
+    the model vocabulary (the words whose counts the model can explain).
+    """
+
+    state = load_artifact_pickle(condition_dir / "params/model_state.pkl")
+    model_vocabulary = set(str(word) for word in state.vocabulary)
+    model_sentence_bow: list[list[list[tuple[int, int]]]] = []
+    for document in documents:
+        doc: list[list[tuple[int, int]]] = []
+        for sentence in document.sentences_tokenized:
+            counts: dict[int, int] = {}
+            for token in sentence:
+                word_id = state.vocabulary.get(token)
+                if word_id is not None:
+                    counts[int(word_id)] = counts.get(int(word_id), 0) + 1
+            doc.append(sorted(counts.items()))
+        model_sentence_bow.append(doc)
+    likelihoods = sentlda_log_likelihood_by_doc(
+        model_sentence_bow,
+        topic_word_counts=state.topic_word_counts,
+        beta=float(state.beta),
+    )
+    return (
+        likelihoods,
+        _alpha_vector(state.alpha, int(state.num_topics)),
+        model_vocabulary,
+    )
+
+
+def sentence_gaussian_log_likelihoods(
+    *,
+    persisted_model: Any,
+    encoded_documents: Iterable[np.ndarray],
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Frozen Sentence Gaussian LDA table densities per document.
+
+    ``persisted_model`` is the ``PersistedSentenceGaussianLdaModel`` returned by
+    :func:`load_sentence_gaussianlda_model`; ``encoded_documents`` yields the
+    raw (untransformed) encoder output the model was trained on.
+    """
+
+    model = persisted_model.model
+    likelihoods: list[np.ndarray] = []
+    for encoded_view in encoded_documents:
+        encoded = np.asarray(encoded_view, dtype=np.float64)
+        if encoded.size == 0:
+            likelihoods.append(np.empty((0, model.num_tables), dtype=np.float64))
+            continue
+        if encoded.ndim == 1:
+            encoded = encoded.reshape(1, -1)
+        likelihoods.append(
+            np.vstack([model.log_multivariate_tdensity_tables(row) for row in encoded])
+        )
+    return likelihoods, _alpha_vector(model.alpha, model.num_tables)
+
+
 def _load_bleilda(
     *,
     condition_dir: Path,
@@ -608,25 +717,10 @@ def _load_sentlda(
     documents, raw_ids = _load_documents_and_ids(
         model="sentlda", condition_dir=condition_dir, split=split
     )
-    state = load_artifact_pickle(condition_dir / "params/model_state.pkl")
     vocabulary = _vocabulary(dictionary)
     evaluation_id = {word: index for index, word in enumerate(vocabulary)}
-    model_vocabulary = set(str(word) for word in state.vocabulary)
-    model_sentence_bow: list[list[list[tuple[int, int]]]] = []
-    for document in documents:
-        doc: list[list[tuple[int, int]]] = []
-        for sentence in document.sentences_tokenized:
-            counts: dict[int, int] = {}
-            for token in sentence:
-                word_id = state.vocabulary.get(token)
-                if word_id is not None:
-                    counts[int(word_id)] = counts.get(int(word_id), 0) + 1
-            doc.append(sorted(counts.items()))
-        model_sentence_bow.append(doc)
-    likelihoods = sentlda_log_likelihood_by_doc(
-        model_sentence_bow,
-        topic_word_counts=state.topic_word_counts,
-        beta=float(state.beta),
+    likelihoods, alpha, model_vocabulary = sentlda_sentence_log_likelihoods(
+        condition_dir=condition_dir, documents=documents
     )
     unit_counts, covered = _sentence_word_counts(
         documents, evaluation_id, supported_words=model_vocabulary
@@ -638,7 +732,7 @@ def _load_sentlda(
         vocabulary=vocabulary,
         documents=documents,
         raw_ids=raw_ids,
-        alpha=_alpha_vector(state.alpha, int(state.num_topics)),
+        alpha=alpha,
         assignment_unit_type="sentence",
         unit_word_counts_by_doc=unit_counts,
         covered_word_counts=covered,
@@ -677,18 +771,6 @@ def _load_vmf(
         encode_batch_size_override=encoder_batch_size_override,
     )
     encoder_load_sec = time.perf_counter() - encoder_started_at
-    params = load_artifact_json(condition_dir / "params.json")
-    preprocessor = _vmf_embedding_preprocessor(condition_dir, params)
-    likelihoods: list[np.ndarray] = []
-    weights = np.asarray(
-        load_artifact_pickle(condition_dir / "mixture_weights.pkl"), dtype=np.float64
-    )
-    means = np.asarray(
-        load_artifact_pickle(condition_dir / "component_means.pkl"), dtype=np.float64
-    )
-    kappa = np.asarray(
-        load_artifact_pickle(condition_dir / "kappa_per_topic.pkl"), dtype=np.float64
-    )
     encoding_started_at = time.perf_counter()
     encoded_corpus = encode_sentence_corpus(
         encoder=encoder,
@@ -698,22 +780,10 @@ def _load_vmf(
     )
     sentence_encoding_sec = time.perf_counter() - encoding_started_at
     likelihood_started_at = time.perf_counter()
-    for encoded_view in encoded_corpus.iter_documents():
-        encoded = np.asarray(encoded_view, dtype=np.float64)
-        encoded = preprocessor.transform(encoded)
-        if encoded.shape[0]:
-            norms = np.linalg.norm(encoded, axis=1, keepdims=True)
-            if np.any(norms <= 0.0):
-                raise ValueError("vMF encoder produced a zero vector")
-            encoded = encoded / norms
-        likelihoods.append(
-            vmf_mixture_log_likelihood(
-                encoded,
-                mixture_weights=weights,
-                component_means=means,
-                kappa_per_topic=kappa,
-            )
-        )
+    likelihoods, alpha = vmf_sentence_log_likelihoods(
+        condition_dir=condition_dir,
+        encoded_documents=encoded_corpus.iter_documents(),
+    )
     topic_likelihood_sec = time.perf_counter() - likelihood_started_at
     execution_metadata: dict[str, object] = {
         "requested_device": encoder_device_requested,
@@ -740,7 +810,7 @@ def _load_vmf(
         vocabulary=vocabulary,
         documents=documents,
         raw_ids=raw_ids,
-        alpha=_alpha_vector(params["alpha"], means.shape[0]),
+        alpha=alpha,
         assignment_unit_type="sentence",
         unit_word_counts_by_doc=unit_counts,
         covered_word_counts=covered,
@@ -828,7 +898,6 @@ def _load_sentence_gaussian(
     persisted = load_sentence_gaussianlda_model(
         param_dir=condition_dir / "params", encoder=encoder
     )
-    likelihoods: list[np.ndarray] = []
     encoding_started_at = time.perf_counter()
     encoded_corpus = encode_sentence_corpus(
         encoder=encoder,
@@ -838,23 +907,10 @@ def _load_sentence_gaussian(
     )
     sentence_encoding_sec = time.perf_counter() - encoding_started_at
     likelihood_started_at = time.perf_counter()
-    for encoded_view in encoded_corpus.iter_documents():
-        encoded = np.asarray(encoded_view, dtype=np.float64)
-        if encoded.size == 0:
-            likelihoods.append(
-                np.empty((0, persisted.model.num_tables), dtype=np.float64)
-            )
-            continue
-        if encoded.ndim == 1:
-            encoded = encoded.reshape(1, -1)
-        likelihoods.append(
-            np.vstack(
-                [
-                    persisted.model.log_multivariate_tdensity_tables(row)
-                    for row in encoded
-                ]
-            )
-        )
+    likelihoods, alpha = sentence_gaussian_log_likelihoods(
+        persisted_model=persisted,
+        encoded_documents=encoded_corpus.iter_documents(),
+    )
     topic_likelihood_sec = time.perf_counter() - likelihood_started_at
     execution_metadata = {
         "requested_device": encoder_device_requested,
@@ -881,7 +937,7 @@ def _load_sentence_gaussian(
         vocabulary=vocabulary,
         documents=documents,
         raw_ids=raw_ids,
-        alpha=_alpha_vector(persisted.model.alpha, persisted.model.num_tables),
+        alpha=alpha,
         assignment_unit_type="sentence",
         unit_word_counts_by_doc=unit_counts,
         covered_word_counts=covered,
@@ -1184,13 +1240,17 @@ def _validate_etm_checkpoint_beta(
     *, saved_beta: np.ndarray, checkpoint_beta: np.ndarray
 ) -> None:
     # Training persists beta on CUDA, while evaluation restores the checkpoint
-    # on CPU. Softmax over a large vocabulary can differ by a few tens of
-    # micro-units across those backends, so allow that numerical drift while
-    # still rejecting materially different checkpoints.
+    # on CPU. Softmax over a large vocabulary differs across those backends,
+    # and the gap grows with the topic count because the max is taken over
+    # K * V entries. Measured on 20newsgroup/all (V = 25879): K=30 -> 2.1e-6,
+    # K=50 -> 4.6e-6, K=100 -> 5.3e-5, with a mean gap near 1e-9. Betas from
+    # genuinely different runs sit 2.5e-1 to 9.8e-1 apart, so 5e-4 keeps a
+    # ~500x margin against a materially different checkpoint while no longer
+    # rejecting large-K runs as false positives.
     if saved_beta.shape != checkpoint_beta.shape or not np.allclose(
         saved_beta,
         checkpoint_beta,
-        atol=5e-5,
+        atol=5e-4,
         rtol=1e-5,
     ):
         raise ValueError(
@@ -1333,6 +1393,168 @@ def _load_ctm(
     )
 
 
+def _load_sam(
+    *,
+    condition_dir: Path,
+    num_topics: int,
+    category: str,
+    dictionary: Dictionary,
+    topn: int,
+    split: str,
+    npmi_min_expected_count: float | None = None,
+) -> RuntimeTopicWords:
+    """Topic words for the Spherical Admixture Model.
+
+    Modelled on :func:`_load_ctm` rather than :func:`_load_etm`: like CTM, SAM
+    persists everything the evaluation needs (a document-topic matrix and a
+    topic-word matrix), so no model is reconstructed and no inference is re-run.
+
+    Two rankings come out of this loader:
+
+    * ``evaluation`` ranks the **signed** topic directions.  This is what SAM
+      actually parameterizes, and the ranking machinery handles it correctly --
+      ``stable_top_word_indices`` gates on ``np.isfinite`` and sorts on
+      ``-values``, so negative weights are legal candidates that simply rank
+      last.  ``_raise_for_degenerate_topics`` is deliberately *not* applied to
+      this matrix: its default eligibility is ``values > 0``, which would
+      silently impose "the top-N must all be positively weighted", and its
+      ``allow_zero_joint_counts`` branch tests a column sum that is meaningless
+      for a signed matrix.  ``rank_topic_words`` already raises
+      ``InsufficientTopicWordsError`` on the genuinely correct condition.
+    * ``display`` ranks word-topic NPMI over positive-part expected counts, which
+      is what the default ``word_topic_score_mode`` consumes and what makes SAM
+      comparable with ETM and CTM.
+    """
+
+    documents, raw_ids = _load_documents_and_ids(
+        model="sam", condition_dir=condition_dir, split=split
+    )
+    model_vocabulary = _load_sam_vocabulary(condition_dir)
+    directions = np.asarray(
+        load_artifact_pickle(condition_dir / "params" / "topic_word_scores.pkl"),
+        dtype=np.float64,
+    )
+    if directions.shape != (num_topics, len(model_vocabulary)):
+        raise ValueError(
+            "SAM topic-word matrix is not aligned with the request: "
+            f"scores={directions.shape} topics={num_topics} "
+            f"vocabulary={len(model_vocabulary)}"
+        )
+
+    vocabulary = _vocabulary(dictionary)
+    mapped, covered_types = restrict_scores_to_evaluation_vocabulary(
+        directions,
+        model_vocabulary=model_vocabulary,
+        evaluation_vocabulary=vocabulary,
+    )
+    eligible = np.broadcast_to(covered_types, mapped.shape)
+    words = rank_topic_words(mapped, vocabulary, topn=topn, eligible_mask=eligible)
+
+    theta_path = (
+        condition_dir / "params" / "sam.pkl"
+        if split == "train"
+        else condition_dir / "infer" / f"{category}.pkl"
+    )
+    theta = np.asarray(load_artifact_pickle(theta_path), dtype=np.float64)
+    if theta.ndim != 2 or theta.shape != (len(documents), num_topics):
+        raise ValueError(
+            "SAM document-topic distribution is not aligned with documents: "
+            f"theta={theta.shape} documents={len(documents)} topics={num_topics}"
+        )
+    if not np.all(np.isfinite(theta)) or np.any(theta < 0.0):
+        raise ValueError(
+            "SAM document-topic distribution must be finite and non-negative"
+        )
+    theta_sums = theta.sum(axis=1, keepdims=True)
+    if np.any(theta_sums <= 0.0):
+        raise ValueError("SAM document-topic distribution contains an empty document")
+    theta = theta / theta_sums
+
+    eval_id = {word: index for index, word in enumerate(vocabulary)}
+    corpus_counts = _corpus_word_counts(documents, eval_id)
+    covered_counts = corpus_counts * covered_types
+
+    model_id = {word: index for index, word in enumerate(model_vocabulary)}
+    model_corpus_bow: list[list[tuple[int, int]]] = []
+    for document in documents:
+        counts: dict[int, int] = {}
+        for token in document.document_tokens:
+            word_id = model_id.get(token)
+            if word_id is not None:
+                counts[word_id] = counts.get(word_id, 0) + 1
+        model_corpus_bow.append(sorted(counts.items()))
+
+    model_stats, posterior_metadata = compute_sam_expected_counts(
+        doc_topic=theta,
+        topic_directions=directions,
+        corpus_bow=model_corpus_bow,
+    )
+    eval_counts = np.zeros((num_topics, len(vocabulary)), dtype=np.float64)
+    for source_id, word in enumerate(model_vocabulary):
+        target_id = eval_id.get(word)
+        if target_id is not None:
+            eval_counts[:, target_id] = model_stats.expected_counts[:, source_id]
+    stats = _statistics_from_counts(eval_counts)
+    _raise_for_degenerate_topics(
+        stats.expected_counts,
+        vocabulary=vocabulary,
+        required_topn=topn,
+        eligible_mask=np.broadcast_to(covered_types, stats.expected_counts.shape),
+        allow_zero_joint_counts=True,
+    )
+    npmi_words = rank_topic_words(
+        word_topic_npmi(stats, min_expected_count=npmi_min_expected_count),
+        vocabulary,
+        topn=topn,
+    )
+
+    vocabulary_fingerprint = _fingerprint({"ordered_vocabulary": vocabulary})
+    corpus_fingerprint = _fingerprint({"raw_document_ids": raw_ids, "split": split})
+    posterior_metadata.update(
+        {
+            "theta_source": str(theta_path),
+            "condition_fingerprint": _condition_fingerprint(condition_dir),
+            "vocabulary_fingerprint": vocabulary_fingerprint,
+            "corpus_fingerprint": corpus_fingerprint,
+        }
+    )
+    return RuntimeTopicWords(
+        evaluation=TopicWordsResult(
+            topic_words=words,
+            topic_word_source="native_sam_signed_topic_direction",
+            score_mode="topic_word_cosine_weight",
+            score_definition=(
+                "signed SAM topic direction on the unit sphere in vocabulary space"
+            ),
+        ),
+        display_topic_words=npmi_words,
+        display_source="sam_positive_part_word_topic_npmi",
+        display_score_mode="word_topic_npmi",
+        protocol="sam_positive_part_topics_with_document_mixture_responsibilities",
+        condition_dir=condition_dir,
+        source_condition_fingerprint=_condition_fingerprint(condition_dir),
+        vocabulary_fingerprint=vocabulary_fingerprint,
+        corpus_fingerprint=corpus_fingerprint,
+        coverage=compute_coverage(
+            covered_word_counts=covered_counts,
+            corpus_word_counts=corpus_counts,
+        ),
+        posterior_metadata=posterior_metadata,
+        expected_counts=stats.expected_counts,
+    )
+
+
+def _load_sam_vocabulary(condition_dir: Path) -> list[str]:
+    payload = load_artifact_json(condition_dir / "params" / "vocabulary.json")
+    if isinstance(payload, dict):
+        return [
+            word for word, _ in sorted(payload.items(), key=lambda item: int(item[1]))
+        ]
+    if isinstance(payload, list):
+        return [str(word) for word in payload]
+    raise ValueError(f"Invalid SAM vocabulary payload: {condition_dir}")
+
+
 def resolve_runtime_topic_words(
     *,
     model: str,
@@ -1353,13 +1575,23 @@ def resolve_runtime_topic_words(
     encoder_device_requested: str | None = None,
     encoder_batch_size_override: int | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> RuntimeTopicWords:
     requested_encoder_device = encoder_device_requested or encoder_device
     normalized_model = "vmf" if model == "vmf_sentence_lda" else model
-    # Only the gaussian family stores a prior-scale path variant; vMF experiment
-    # dirs are not keyed on it.
+    # Only the gaussian family stores a prior-scale path variant; vMF experiment dirs
+    # are keyed on the hyperparameter label ``vmf_variant`` instead (None = default run).
     parameter_variant = (
-        format_prior_scale_variant(prior_scale)
+        compose_gaussian_parameter_variant(
+            runner=(
+                "sentence_gaussianlda"
+                if normalized_model == "gaussian"
+                else normalized_model
+            ),
+            prior_scale=prior_scale,
+            covariance_type=covariance_type,
+        )
         if prior_scale is not None and normalized_model in GAUSSIAN_PRIOR_SCALE_MODELS
         else None
     )
@@ -1371,6 +1603,7 @@ def resolve_runtime_topic_words(
             category=category,
             run_name=data_run,
             embedding_variant=embedding_variant,
+            parameter_variant=vmf_variant,
         )
     else:
         condition_dir = resolve_baseline_condition_dir(
@@ -1398,6 +1631,16 @@ def resolve_runtime_topic_words(
             dictionary=dictionary,
             config=posterior_config,
             topn=topn,
+            npmi_min_expected_count=npmi_min_expected_count,
+        )
+    if normalized_model in {"sam", "sam_tf"}:
+        return _load_sam(
+            condition_dir=condition_dir,
+            num_topics=num_topics,
+            category=category,
+            dictionary=dictionary,
+            topn=topn,
+            split=split,
             npmi_min_expected_count=npmi_min_expected_count,
         )
     if normalized_model == "sentlda":

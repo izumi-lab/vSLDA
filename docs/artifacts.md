@@ -5,26 +5,43 @@ and downstream evaluation tasks.
 
 ## Result Roots
 
-- `results/experiments/`
-- `results/baselines/`
-- `results/classification/`
+Model outputs (the writers of `experiments run`):
 
-Additional analysis tasks create sibling roots for topic analysis, diagnostics, and
-visualization outputs.
+- `results/experiments/<dataset>/` for `vmf_sentence_lda` runs, plus one `summary.json` per dataset
+- `results/baselines/<dataset>/<data_run>/<model>/` for the baseline runners
+
+Evaluation and analysis roots that the current workflows populate:
+
+- `results/classification/` for `evaluation classify` (`latest/`, `archive/`), plus
+  `summaries/` (`summarize-classification`) and `figures/` (`plot_limited`)
+- `results/topic_analysis/coherence/` for `word_based_metrics`, plus `summaries/`
+  (`summarize-coherence`); `.cache/`, `.checkpoints/` and `partial/` hold resumable state
+- `results/topic_analysis/entropy_based/` for `entropy_based_metrics`, plus `summaries/`
+  and `summaries_<assignment>/` (`entropy-based-summary`, see "Summary Sidecars")
+- `results/topic_analysis/topic_pairs/` for `topic_pair_metrics`, plus `summaries/`
+  (`topic-pair-summary`) and `.cache/sentence_embeddings/`
+- `results/topic_analysis/geometry_based/` for `geometry_based_metrics`
+- `results/topic_analysis/foldin/summaries/` for `evaluation vmf-foldin-theta` (one CSV)
+- `results/timing/summaries/` for `summarize-timing`
+- `results/analysis/topic_sweep/<dataset>/` for `evaluation topic-sweep` (csv/json/tex plus `figures/`)
+- `results/analysis/fine_category_{lexical,embedding}_similarity{,_sensitivity}/run_<timestamp>/`
+  for `scripts/analyze_fine_category_*.py` (one directory per invocation, no `latest/` pointer)
+- `results/tables/topic_interpretation/` for `scripts/render_topic_interpretation_tex.py` and
+  `scripts/render_compared_tex.py`
+- `results/diagnostics/` for `scripts/compute_gaussian_covariance_conditions.py`
+- `results/visualization/` for `sentence_topic_inspection`
+
+Roots that CLI commands define but that no current workflow populates (they appear only
+when the corresponding command is run):
+
+- `results/topic_analysis/label_profile/` for `word_based_label_profile`
+- `results/topic_count_analysis/` for `topic_count_diagnostics`
+- `results/analysis/vmf_vs_baseline/` for `cross_model_pair_diagnostics`
 
 Classification readers resolve feature inputs from model `latest/CURRENT.json`
 pointers first. When multiple embedding-aware model outputs match the same
 topic/iteration/category, classification treats them as separate feature sets and can
 filter them with `--embedding-variant`.
-
-Repo-owned analysis roots include:
-
-- `results/topic_analysis/coherence/` for `word_based_metrics`
-- `results/topic_analysis/geometry_based/` for `geometry_based_metrics`
-- `results/topic_analysis/label_profile/` for `word_based_label_profile`
-- `results/topic_count_analysis/` for `topic_count_diagnostics`
-- `results/analysis/vmf_vs_baseline/` for `cross_model_pair_diagnostics`
-- `results/visualization/` for `sentence_topic_inspection`
 
 ## vMF Sentence LDA Run Layout
 
@@ -99,8 +116,8 @@ Examples:
 - `glove-wiki-gigaword-50` -> `glove50`
 - `wikientvec:20190520:jawiki.word_vectors.100d.txt.bz2` -> `wikient100`
 
-Baselines that do not use sentence or word embeddings, such as `bleilda` and
-`sentlda`, keep the plain `k<num_topics>_it<iteration>` display key.
+Baselines that do not use sentence or word embeddings, such as `bleilda`,
+`sam` and `sentlda`, keep the plain `k<num_topics>_it<iteration>` display key.
 
 ETM writes document-topic distributions to `params/etm.pkl` and
 `infer/<category>.pkl`, a soft-preferred copy to
@@ -108,6 +125,18 @@ ETM writes document-topic distributions to `params/etm.pkl` and
 `params/topic_word_scores.pkl` with `params/vocabulary.json`. Word-based metrics
 read this learned ETM beta distribution; classification uses the document-topic
 artifacts.
+
+SAM uses the same layout with `params/sam.pkl` as the train artifact, plus
+`params/idf.pkl` (needed to reproduce held-out features). Note that its
+`params/topic_word_scores.pkl` holds signed*unit vectors rather than the
+probability distribution ETM stores under the same filename.
+
+CTM stores the train document-topic matrix in `params/ctm.pkl`, the vocabulary in
+`params/tp.pkl`, and the fitted network in
+`params/contextualized_topic_model_<hyperparameters>/epoch_<N>.pth`. The topic-word
+distribution exists only inside that checkpoint: word-based metrics reload it through
+`load_ctm_decoder_scores`, so the `.pth` files (about 186 MB each) must be kept as long
+as CTM coherence or topic words may be recomputed.
 
 ## Evaluation Output Layout
 
@@ -120,6 +149,22 @@ keep backward-compatible fallbacks for older category-first trees.
 results/topic_analysis/geometry_based/latest/<dataset>/<data_run>/<category>/<display_key>/CURRENT.json
 results/topic_analysis/geometry_based/archive/YYYY-MM-DD/<dataset>/<data_run>/<category>/<display_key>/exec_YYYYMMDDTHHMMSSZ/
 ```
+
+- `entropy_based_metrics` uses:
+
+```text
+results/topic_analysis/entropy_based/latest/<dataset>/<data_run>/<category>/<display_key>/CURRENT.json
+results/topic_analysis/entropy_based/archive/YYYY-MM-DD/<dataset>/<data_run>/<category>/<display_key>/exec_YYYYMMDDTHHMMSSZ/
+```
+
+- `topic_pair_metrics` uses the same layout under `results/topic_analysis/topic_pairs/`
+  (one condition per model x K x category, plus a `cross_model` condition per K x category
+  holding the between-model topic overlap), caches the raw sentence embeddings of each
+  category under `results/topic_analysis/topic_pairs/.cache/sentence_embeddings/v1/<key>/`,
+  and `topic_pair_summary` writes
+  `results/topic_analysis/topic_pairs/summaries/<dataset>/<data_run>/<encoder>/topic_pairs_<dataset>_<data_run>_<encoder>_<K>topic.scores.json`
+  (raw per-run values: per-topic arrays, K x K pair matrices, cross-model overlap,
+  provenance; nothing aggregated).
 
 - `word_based_metrics` uses:
 
@@ -184,6 +229,39 @@ results/classification/<dataset>/<data_run>/all/<condition_id>/
 - several analysis and reporting readers resolve model artifacts through the
   latest-aware path helpers
 
+## Summary Sidecars
+
+The `summaries/` trees are the interface between this repository and the manuscript
+repository: the paper's `make sync` copies only the `*.scores.json` sidecars and aggregates
+them itself. Everything else in `summaries/` (`.runs.csv`, `.runs.json`, `.tex`,
+`run_coverage*.csv`) is a review artifact of this repository and is not consumed downstream.
+
+Layout and stems:
+
+```text
+results/classification/summaries/<dataset>/<data_run>/<classifier>/<encoder>/<metric>_<dataset>_<data_run>_<classifier>_<encoder>_<assignment>_<K>topic.scores.json
+results/topic_analysis/coherence/summaries/<dataset>/<data_run>/<encoder>/coherence_<dataset>_<data_run>_<measure>_<encoder>_<K>topic.scores.json
+results/topic_analysis/entropy_based/summaries/<dataset>/<data_run>/<encoder>/entropy_<dataset>_<data_run>_<encoder>_<K>topic.scores.json
+results/topic_analysis/topic_pairs/summaries/<dataset>/<data_run>/<encoder>/topic_pairs_<dataset>_<data_run>_<encoder>_<K>topic.scores.json
+results/timing/summaries/<dataset>/<encoder>/timing_<dataset>_<data_run>_<encoder>_<K>topic.scores.json
+```
+
+- `<encoder>` is the short encoder identifier (`minilm`, `mpnet`, `bge`, ...), never the
+  `_norm`-suffixed run-directory form.
+- `<assignment>` names the document-topic estimator of the vMF family (vSLDA and MvTM:
+  `hard`, `soft`, `foldin`, `foldincounts`). `entropy-based-summary --output-dir` writes
+  non-default estimators to a sibling tree `summaries_<assignment>/` with the same stems.
+- A sidecar holds raw per-run values and the provenance of every cell (`metric`, `dataset`,
+  `data_run`, `topics`, `iterations`, `classifiers`, `embedding_variants`, `vmf_assignment`,
+  `models`, `categories`, `scores`, `provenance`); nothing is aggregated.
+- `summarize-classification` writes its sidecars next to `--output-path`, so a summary
+  produced with a temporary output path leaves no trace here. The manuscript's variant
+  sidecars (Gaussian prior-scale and covariance variants of the sentence Gaussian LDA
+  baseline, the vSLDA hyperparameter sweep) are produced that way by the paper
+  repository's sync script and exist only there.
+- The timing summary spells the dataset with a hyphen (`20newsgroup-timing`) while the run
+  directories use `results/experiments/20newsgroup_timing/`.
+
 ## Latest Pointers
 
 `CURRENT.json` exists to decouple stable human-readable directory names from strict run
@@ -218,6 +296,13 @@ Display keys stay short and human-readable.
   unknown model names fall back to a slugified model-name tail
 - known word-vector identifiers include `glove100`, `glove50`, and `wikient100`;
   unknown word-vector names fall back to a `wordvec_<slug>` label
+- parameter variants follow the encoder, decimals written with `p`:
+  `sentence_gaussianlda` appends `_norm` (BoW-normalized embeddings, the default since
+  2026-08-25; the earlier `_raw` runs were removed), `_psi0-<scale>` (Gaussian prior
+  scale) and, for reduced covariances, `_cov-diag` / `_cov-iso`, e.g.
+  `k20_it2_minilm_norm_psi0-0p1_cov-iso`; vSLDA hyperparameter-sweep runs append their
+  label, e.g. `k20_it0_c1_minilm_alpha0-0p1`, `..._kappa0-100`, `..._b-20`, `..._t-30`,
+  `..._zeta-8`
 - evaluation outputs may prepend only the axes that are not already encoded by the
   directory tree, for example `bleilda_train_k20_it0`
 - strict run identity stays in `metadata.json` and `CURRENT.json` through
@@ -294,6 +379,13 @@ views needed by multiple models and analysis tasks:
 
 This keeps downstream comparison tied to the actual preprocessing configuration used at
 run time.
+
+Every run writes its own copy (`train_preprocessed.pkl` / `test_preprocessed.pkl` for
+vSLDA, `preprocessed_corpus.pkl` under both `params/` and `infer/` for baselines), yet the
+content depends only on dataset, category and preprocessing settings, so the copies are
+byte-identical across models, K and seeds. They are never modified after writing, so
+`hardlink -c` over `results/baselines results/experiments` may replace them with hard
+links to reclaim space without changing any reader.
 
 ## Versioning
 

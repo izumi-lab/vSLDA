@@ -183,7 +183,7 @@ def test_run_topic_overlap_analysis_uses_embedding_variant_for_paths(
     )
 
     assert ("vmf", "mpnet") in captured
-    assert ("gaussian", "mpnet_raw") in captured
+    assert ("gaussian", "mpnet_norm") in captured
 
 
 def test_run_topic_overlap_analysis_default_out_root_uses_archive_latest_layout(

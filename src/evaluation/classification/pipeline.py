@@ -178,6 +178,8 @@ def collect_feature_sets(
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     target_column: str = "target_str",
     label_schema: str = "identity",
 ) -> tuple[list[FeatureSet], list[int], list[int], dict[str, Any]]:
@@ -194,6 +196,8 @@ def collect_feature_sets(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     ):
         if selectors and not any(
             model_matches_selector(
@@ -339,6 +343,8 @@ def run_classification_task(
     feature_resolve_mode: str = "all",
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> (
     tuple[
         dict[str, float],
@@ -370,6 +376,8 @@ def run_classification_task(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         target_column=target_column,
         label_schema=label_schema,
     )

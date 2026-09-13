@@ -235,12 +235,11 @@ Experiment, baseline, classification, and analysis outputs use a stable
 
 Main generated roots:
 
-- `results/experiments/`
-- `results/baselines/`
-- `results/classification/`
-- `results/topic_analysis/`
-- `results/topic_count_analysis/`
-- `results/visualization/`
+- `results/experiments/`, `results/baselines/`: model runs
+- `results/classification/`, `results/topic_analysis/`, `results/timing/`: evaluation runs
+  and their `summaries/` (the `*.scores.json` sidecars are the interface to the manuscript)
+- `results/analysis/`, `results/tables/`, `results/diagnostics/`, `results/visualization/`:
+  analysis scripts and inspection outputs
 
 For the complete output contract, see [`docs/artifacts.md`](docs/artifacts.md).
 

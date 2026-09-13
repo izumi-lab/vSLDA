@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from src.core.vmf_assignment import DEFAULT_VMF_ASSIGNMENT
+
 from .config import DEFAULT_ALIGNMENT_MODE, DEFAULT_FEATURE_RESOLVE_MODE, RESULT_ROOT
 from .limited import (
     DEFAULT_SAMPLING_MAX_ATTEMPTS,
@@ -31,6 +33,8 @@ def run_classification_suite(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
 ) -> None:
     run_classification_evaluation(
         iterations=iterations,
@@ -49,6 +53,8 @@ def run_classification_suite(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
     )
 
 
@@ -73,6 +79,8 @@ def run_limited_classification_suite(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     sampling_repeats: Sequence[int] | None = None,
     sampling_seed_stride: int = 1000,
     sampling_max_attempts: int = DEFAULT_SAMPLING_MAX_ATTEMPTS,
@@ -98,6 +106,8 @@ def run_limited_classification_suite(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         sampling_repeats=sampling_repeats,
         sampling_seed_stride=sampling_seed_stride,
         sampling_max_attempts=sampling_max_attempts,
@@ -113,7 +123,7 @@ def write_classification_summary(
     iterations: list[int],
     data_run: str = "default",
     classifiers: Sequence[str] | None = None,
-    vmf_assignment: str = "hard",
+    vmf_assignment: str = DEFAULT_VMF_ASSIGNMENT,
     alignment_mode: str = DEFAULT_ALIGNMENT_MODE,
     result_root: Path = RESULT_ROOT,
     target_column: str = "target_str",
@@ -123,6 +133,8 @@ def write_classification_summary(
     feature_resolve_mode: str = DEFAULT_FEATURE_RESOLVE_MODE,
     selected_models: Sequence[str] | None = None,
     prior_scale: float | None = None,
+    covariance_type: str | None = None,
+    vmf_variant: str | None = None,
     excluded_categories: Sequence[str] | None = None,
     include_all_category: bool = False,
     output_path: Path | None = None,
@@ -144,6 +156,8 @@ def write_classification_summary(
         feature_resolve_mode=feature_resolve_mode,
         selected_models=selected_models,
         prior_scale=prior_scale,
+        covariance_type=covariance_type,
+        vmf_variant=vmf_variant,
         excluded_categories=excluded_categories,
         include_all_category=include_all_category,
         output_path=output_path,
