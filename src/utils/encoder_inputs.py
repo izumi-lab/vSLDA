@@ -117,3 +117,31 @@ def encode_documents(
     return encoder.encode(
         document_texts_for_encoder(documents, encoder), **encode_kwargs
     )
+
+
+def encode_documents_batched(
+    encoder: Any,
+    corpus: Sequence[Sequence[str]],
+    **encode_kwargs: Any,
+) -> list[np.ndarray]:
+    """Encode every sentence of ``corpus`` in one call and split the rows per document.
+
+    Sentence encoders embed each sentence independently (per-sentence pooling and
+    per-row normalisation), so this returns the same embeddings as one ``encode`` call
+    per document up to floating-point noise, without the per-call overhead that
+    dominates CPU encoding of short documents. Returns float64 arrays of shape
+    ``(len(doc), dim)``; an empty document yields a ``(0, dim)`` array.
+    """
+    lengths = [len(doc) for doc in corpus]
+    flat = [sentence for doc in corpus for sentence in doc]
+    if flat:
+        embeddings = np.asarray(encoder.encode(flat, **encode_kwargs), dtype=np.float64)
+    else:
+        dim = int(encoder.get_sentence_embedding_dimension())
+        embeddings = np.zeros((0, dim), dtype=np.float64)
+    if embeddings.ndim != 2 or embeddings.shape[0] != len(flat):
+        raise ValueError(
+            f"encoder returned shape {embeddings.shape} for {len(flat)} sentences"
+        )
+    boundaries = np.cumsum(lengths)[:-1] if lengths else []
+    return [np.ascontiguousarray(part) for part in np.split(embeddings, boundaries)]

@@ -474,7 +474,7 @@ def normalize_trace(values: Sequence[float]) -> List[float]:
 
 
 PANEL_TITLES: Dict[str, str] = {
-    VSLDA_KEY: "vSLDA (per MCEM iteration)",
+    VSLDA_KEY: "vSLDA (per outer iteration)",
     GSLDA_KEY: "GSLDA (per Gibbs sweep)",
 }
 
