@@ -55,6 +55,7 @@ from src.baselines.models.gaussian_reduced_numerics import (
     normalize_covariance_type,
     reduced_prior_nu,
 )
+from src.utils.encoder_inputs import encode_documents_batched
 
 
 @dataclass(frozen=True)
@@ -197,11 +198,10 @@ class GaussianLDATrainer:
 
         # Normal inverse wishart prior
         encode_start = time.perf_counter()
+        # One batched encode over all sentences, split back per document; identical to a
+        # per-document loop up to float noise but far cheaper on CPU.
         self.encoded_corpus = (
-            [
-                np.asarray(self.encoder.encode(doc), dtype=np.float64)
-                for doc in self.corpus
-            ]
+            encode_documents_batched(self.encoder, self.corpus)
             if self.preencode_corpus
             else []
         )

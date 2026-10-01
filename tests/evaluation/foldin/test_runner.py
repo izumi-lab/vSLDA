@@ -19,7 +19,6 @@ from src.evaluation.foldin.runner import (
 from src.evaluation.topic_pairs.inputs import encoder_fingerprint
 from src.evaluation.word_based.topic_assignment import CollapsedFoldInConfig
 from tests.evaluation.foldin.conftest import (
-    ENCODER_CONFIG,
     toy_embeddings,
     toy_log_likelihoods,
     write_vmf_run,

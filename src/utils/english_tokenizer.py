@@ -99,7 +99,7 @@ def _get_wordnet_lemmatizer() -> WordNetLemmatizer:
         except LookupError as exc:
             raise RuntimeError(
                 "NLTK wordnet corpus is required for English lemmatization. "
-                "Install it with: poetry run setup-nltk"
+                "Install it with: uv run setup-nltk (or: poetry run setup-nltk)"
             ) from exc
         return WordNetLemmatizer()
 

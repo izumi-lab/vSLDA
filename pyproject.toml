@@ -57,7 +57,8 @@ dev = [
     "black (>=25.11.0,<26.0.0)",
     "isort (>=7.0.0,<8.0.0)",
     "flake8 (>=7.3.0,<8.0.0)",
-    "pytest (>=8.4.2,<9.0.0)"
+    "pytest (>=8.4.2,<9.0.0)",
+    "ruff (>=0.9.0,<1.0.0)"
 ]
 ml = [
     "bertopic (>=0.17.4,<0.18.0)",
@@ -80,6 +81,35 @@ target-version = ["py312"]
 [tool.isort]
 profile = "black"
 line_length = 88
+skip_gitignore = true
+
+[tool.uv]
+default-groups = ["dev"]
+
+# Ruff is the linter only. Formatting stays with black and import sorting with
+# isort, so `ruff format` and the "I" rules are intentionally not used.
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E203", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/count_dataset_subcategories.py" = ["E402"]
+"scripts/plot_sentence_embedding_norm_distribution.py" = ["E402"]
+"src/baselines/adapters.py" = ["F401"]
+"src/baselines/models/bertopic_kmeans.py" = ["E402"]
+"src/baselines/runners.py" = ["F401"]
+"src/core/paths.py" = ["E402", "F401"]
+"src/experiments/config.py" = ["F401"]
+"src/evaluation/classification/config.py" = ["E402"]
+"src/evaluation/word_based/reporting.py" = ["F401"]
+"src/evaluation/foldin/theta.py" = ["F401"]  # re-exports _atomic_write_json
+"tests/evaluation/test_topic_sweep.py" = ["E402"]
+"tests/evaluation/word_based/test_sentence_encoding.py" = ["E402"]
+"tests/evaluation/word_based/test_topic_word_runtime.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -34,6 +34,7 @@ from src.data.preprocessing import (
     select_modelable_documents,
 )
 from src.utils.encoder_inputs import (
+    encode_documents_batched,
     fit_encoder_on_sentences,
     sentence_corpus_for_encoder,
 )
@@ -83,16 +84,26 @@ def _sentence_topic_soft(
     batch_size: int,
     soft_temperature: float,
     show_progress_bar: bool,
+    encoded_corpus: Sequence[np.ndarray] | None = None,
 ) -> list[np.ndarray]:
-    sentence_topic_soft: list[np.ndarray] = []
-    for doc in corpus:
-        doc_embeddings = np.asarray(
-            model.encoder.encode(
-                list(doc),
-                batch_size=batch_size,
-                show_progress_bar=show_progress_bar,
-            )
+    """Per-sentence topic posteriors. ``encoded_corpus`` (one array per document, aligned
+    with ``corpus``) skips re-encoding when the embeddings are already at hand."""
+    if encoded_corpus is not None and len(encoded_corpus) != len(corpus):
+        raise ValueError(
+            f"encoded_corpus has {len(encoded_corpus)} documents, corpus has {len(corpus)}"
         )
+    sentence_topic_soft: list[np.ndarray] = []
+    for doc_index, doc in enumerate(corpus):
+        if encoded_corpus is not None:
+            doc_embeddings = np.asarray(encoded_corpus[doc_index])
+        else:
+            doc_embeddings = np.asarray(
+                model.encoder.encode(
+                    list(doc),
+                    batch_size=batch_size,
+                    show_progress_bar=show_progress_bar,
+                )
+            )
         if doc_embeddings.size == 0:
             sentence_topic_soft.append(np.zeros((0, num_topics), dtype=np.float32))
             continue
@@ -214,6 +225,8 @@ def train_sentence_gaussianlda(
             batch_size=params.encode_batch_size,
             soft_temperature=params.soft_temperature,
             show_progress_bar=False,
+            # Reuse the training-time embeddings instead of re-encoding every document.
+            encoded_corpus=trainer.encoded_corpus if params.preencode_corpus else None,
         ),
         train_preprocessed=train_preprocessed,
         train_selection=train_selection,
@@ -260,27 +273,33 @@ def infer_sentence_gaussianlda(
     test_preprocessed = test_selection.documents
     corpus = sentence_corpus_for_encoder(test_preprocessed, train_result.model.encoder)
     output = np.zeros((len(corpus), num_topics), dtype=float)
+    # Encode the test corpus once; the soft posteriors and Gibbs inference share it.
+    encoded_corpus = (
+        encode_documents_batched(
+            train_result.model.encoder,
+            corpus,
+            batch_size=params.encode_batch_size,
+            show_progress_bar=False,
+        )
+        if params.preencode_corpus
+        else None
+    )
     sentence_topic_soft = _sentence_topic_soft(
         corpus=corpus,
         model=train_result.model,
         num_topics=num_topics,
         batch_size=params.encode_batch_size,
         soft_temperature=params.soft_temperature,
-        show_progress_bar=params.preencode_corpus,
+        show_progress_bar=False,
+        encoded_corpus=encoded_corpus,
     )
     for row_index, sent_probs in enumerate(sentence_topic_soft):
         if sent_probs.size == 0:
             continue
-        if params.preencode_corpus:
-            # Re-encode the matching sentences in a single batch for Gibbs inference.
-            encoded_doc = np.asarray(
-                train_result.model.encoder.encode(
-                    list(corpus[row_index]),
-                    batch_size=params.encode_batch_size,
-                    show_progress_bar=False,
-                )
+        if encoded_corpus is not None:
+            topics = train_result.model.sample(
+                encoded_corpus[row_index], params.num_gibbs_iters
             )
-            topics = train_result.model.sample(encoded_doc, params.num_gibbs_iters)
         else:
             topics = train_result.model.sample(
                 list(corpus[row_index]), params.num_gibbs_iters

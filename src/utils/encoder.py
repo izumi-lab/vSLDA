@@ -21,7 +21,7 @@ def _load_sentence_transformers() -> tuple[Any, Any]:
     except ImportError as exc:
         raise RuntimeError(
             "SentenceTransformer backends require ML dependencies. "
-            "Install them with: poetry install --with ml"
+            "Install them with: uv sync --group ml (or: poetry install --with ml)"
         ) from exc
     if SentenceTransformer is None:
         SentenceTransformer = _SentenceTransformer

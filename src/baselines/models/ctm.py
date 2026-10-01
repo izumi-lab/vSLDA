@@ -47,7 +47,7 @@ def _load_ctm_dependencies() -> tuple[Any, Any]:
     except ImportError as exc:
         raise RuntimeError(
             "CTM baselines require ML dependencies. "
-            "Install them with: poetry install --with ml"
+            "Install them with: uv sync --group ml (or: poetry install --with ml)"
         ) from exc
     if CombinedTM is None:
         CombinedTM = _CombinedTM

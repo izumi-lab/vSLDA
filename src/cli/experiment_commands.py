@@ -9,7 +9,7 @@ from src.baselines.params import (
     format_prior_scale_variant,
     normalize_covariance_type,
 )
-from src.cli.options import empty_to_none, sorted_unique_ints
+from src.cli.options import empty_to_none
 from src.cli.workflows import DEFAULT_ALL_EXPERIMENT_CONFIGS
 
 

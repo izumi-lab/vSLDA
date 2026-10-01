@@ -8,7 +8,7 @@ models under explicit, reproducible conditions.
 Shared preprocessing expects the following runtime resources:
 
 - English lemmatization uses NLTK `WordNetLemmatizer`
-- the `nltk` package is installed by Poetry
+- the `nltk` package is installed by `uv sync` (or `poetry install`)
 - the NLTK `wordnet` corpus is downloaded by the project setup script
 - Japanese tokenization uses the MeCab Python bindings plus a dictionary such as
   `mecab-ipadic-neologd`, `unidic`, or `unidic-lite`
@@ -18,7 +18,7 @@ Shared preprocessing expects the following runtime resources:
 Install the English lemmatization corpus with:
 
 ```bash
-poetry run setup-nltk
+uv run setup-nltk
 ```
 
 ## Shared Configuration Axes
