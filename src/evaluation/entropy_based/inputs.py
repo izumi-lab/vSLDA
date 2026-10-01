@@ -56,7 +56,6 @@ from typing import Literal, Sequence
 import numpy as np
 
 from src.baselines.adapter_runtime import compose_gaussian_parameter_variant
-from src.baselines.params import format_prior_scale_variant
 from src.core.artifacts import load_artifact_pickle, load_json
 from src.core.paths import resolve_baseline_condition_dir, resolve_vmf_experiment_dir
 from src.core.vmf_assignment import DEFAULT_DOC_TOPIC_SOURCE

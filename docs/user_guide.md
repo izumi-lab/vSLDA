@@ -9,10 +9,10 @@ experiments, and evaluating results. For artifact details, see
 Use the installed console script for normal runs:
 
 ```bash
-poetry run spherical-sentence-topics --help
+uv run spherical-sentence-topics --help
 ```
 
-The equivalent module entry point is `poetry run python -m src.cli --help`.
+The equivalent module entry point is `uv run python -m src.cli --help`.
 
 The CLI is grouped by workflow:
 
@@ -20,25 +20,30 @@ The CLI is grouped by workflow:
 - `experiments`: run configured model comparisons
 - `evaluation`: run downstream metrics, diagnostics, and summaries
 
-Set up the Poetry environment with development and ML dependencies before
-running the experiment workflows, then install the NLTK `wordnet` corpus. Some
+Set up the environment with uv, including the ML dependencies, before running
+the experiment workflows, then install the NLTK `wordnet` corpus. Some
 baselines and vocabulary-based workflows use WordNet for English lemmatization:
 
 ```bash
-poetry install --with dev,ml
-poetry run setup-nltk
+uv sync --group ml
+uv run setup-nltk
 ```
 
-For lightweight development that does not run embedding-based experiments, the
-ML dependency group can be omitted:
+`uv sync` always installs the `dev` group. For lightweight development that
+does not run embedding-based experiments, the ML dependency group can be
+omitted:
 
 ```bash
-poetry install --with dev
+uv sync
 ```
 
-Poetry also installs the maintained `jlc-choldate` distribution, which provides
-the `choldate` import without leaving a local `choldate/` checkout in the
-repository.
+Poetry 2.x remains supported as an alternative. Use
+`poetry install --with dev,ml` instead of `uv sync --group ml`, and replace
+`uv run` with `poetry run` in the commands below.
+
+The project dependencies also include the maintained `jlc-choldate`
+distribution, which provides the `choldate` import without leaving a local
+`choldate/` checkout in the repository.
 
 The committed example preset is `configs/experiments/20newsgroup.example.yaml`.
 Use local copies such as `*.local.yaml` for machine-specific experiments.
@@ -48,7 +53,7 @@ Use local copies such as `*.local.yaml` for machine-specific experiments.
 The standard 20 Newsgroups input is generated as CSV files:
 
 ```bash
-poetry run spherical-sentence-topics data prepare-20newsgroup --output-dir data/20newsgroup
+uv run spherical-sentence-topics data prepare-20newsgroup --output-dir data/20newsgroup
 ```
 
 This writes:
@@ -65,7 +70,7 @@ quality policy documented in `docs/preprocessing.md`. To inspect local samples
 before regenerating CSVs, run `data audit-preprocessing` on a prepared split:
 
 ```bash
-poetry run spherical-sentence-topics data audit-preprocessing \
+uv run spherical-sentence-topics data audit-preprocessing \
   --input-path data/20newsgroup/test.csv \
   --sample-size 50
 ```
@@ -78,7 +83,7 @@ review artifacts and do not change model inputs until the dataset is regenerated
 For a lightweight first run, execute only vMF Sentence LDA for one iteration:
 
 ```bash
-poetry run spherical-sentence-topics experiments run \
+uv run spherical-sentence-topics experiments run \
   --config configs/experiments/20newsgroup.example.yaml \
   --models vmf_sentence_lda \
   --iteration 0
@@ -88,7 +93,7 @@ To run the full canonical comparison preset, omit the model and iteration
 filters:
 
 ```bash
-poetry run spherical-sentence-topics experiments run \
+uv run spherical-sentence-topics experiments run \
   --config configs/experiments/20newsgroup.example.yaml
 ```
 
@@ -163,7 +168,7 @@ Supported encoder profiles include:
 For the lightweight vMF-only run above, run classification on one category:
 
 ```bash
-poetry run spherical-sentence-topics evaluation classify \
+uv run spherical-sentence-topics evaluation classify \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -180,7 +185,7 @@ document-topic features. Classification outputs are written under
 Topic-count diagnostics for the same run are available with:
 
 ```bash
-poetry run spherical-sentence-topics evaluation topic-count-diagnostics \
+uv run spherical-sentence-topics evaluation topic-count-diagnostics \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -191,7 +196,7 @@ poetry run spherical-sentence-topics evaluation topic-count-diagnostics \
 Word-based topic metrics for the same run are available with:
 
 ```bash
-poetry run spherical-sentence-topics evaluation word-based-metrics \
+uv run spherical-sentence-topics evaluation word-based-metrics \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -209,7 +214,7 @@ tokenized Wikipedia via `--coherence-reference external` and
 To run the tasks declared by a comparison config, use:
 
 ```bash
-poetry run spherical-sentence-topics evaluation run-from-config \
+uv run spherical-sentence-topics evaluation run-from-config \
   --config configs/experiments/20newsgroup.example.yaml
 ```
 

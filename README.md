@@ -2,8 +2,9 @@
 
 [![python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml/badge.svg)](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![packaging: poetry](https://img.shields.io/badge/packaging-poetry-60A5FA.svg)](https://python-poetry.org/)
 
 Spherical Topic Models with Sentence Embeddings are a family of sentence-level
 topic models that assign topics to sentences, with each sentence represented as
@@ -37,7 +38,8 @@ For the full command guide, see [`docs/user_guide.md`](docs/user_guide.md).
 ## Requirements
 
 - Python `>=3.12,<3.15`
-- Poetry 2.x
+- [uv](https://docs.astral.sh/uv/) (recommended). Poetry 2.x is also supported;
+  see [Using Poetry instead of uv](#using-poetry-instead-of-uv).
 
 ## Installation
 
@@ -46,16 +48,39 @@ NLTK WordNet corpus. WordNet is used for English lemmatization in some
 baselines and vocabulary-based workflows:
 
 ```bash
+uv sync --group ml
+uv run setup-nltk
+```
+
+`uv sync` always installs the `dev` group. For lightweight development that
+does not run embedding-based experiments, the ML dependency group can be
+omitted:
+
+```bash
+uv sync
+```
+
+uv picks the Python version from `.python-version` when it exists. If that file
+names something uv does not understand, such as a pyenv virtualenv, pass the
+version explicitly with `uv sync --python 3.12` or set `UV_PYTHON=3.12`.
+
+### Using Poetry instead of uv
+
+The project is also installable with Poetry 2.x. `poetry.lock` is kept in sync
+with `uv.lock`, so both tools install the same versions:
+
+```bash
 poetry install --with dev,ml
 poetry run setup-nltk
 ```
 
-For lightweight development that does not run embedding-based experiments, the
-ML dependency group can be omitted:
+Any command in this README written as `uv run ...` also works as
+`poetry run ...`.
 
-```bash
-poetry install --with dev
-```
+Poetry automatically uses an in-project `.venv` when one exists, so after
+`uv sync` both tools share the same environment. `uv sync` removes packages
+that are not in the selected groups, so pass the same groups to both tools,
+for example `uv sync --group ml` together with `poetry install --with ml`.
 
 The committed example config uses `encoder.device: cuda`. On CPU-only machines,
 copy the preset to a local config and set `encoder.device: cpu` before running
@@ -64,13 +89,13 @@ experiments.
 Use the installed console script for normal runs:
 
 ```bash
-poetry run spherical-sentence-topics --help
+uv run spherical-sentence-topics --help
 ```
 
 The equivalent module entry point is:
 
 ```bash
-poetry run python -m src.cli --help
+uv run python -m src.cli --help
 ```
 
 The CLI has three main command groups:
@@ -86,7 +111,7 @@ The CLI has three main command groups:
 Prepare the 20 Newsgroups split used by the committed example preset:
 
 ```bash
-poetry run spherical-sentence-topics data prepare-20newsgroup --output-dir data/20newsgroup
+uv run spherical-sentence-topics data prepare-20newsgroup --output-dir data/20newsgroup
 ```
 
 This creates:
@@ -97,7 +122,7 @@ This creates:
 NYT data can be prepared from a raw fine-label pickle:
 
 ```bash
-poetry run spherical-sentence-topics data prepare-nyt \
+uv run spherical-sentence-topics data prepare-nyt \
   --raw-path data/nyt/raw/df_fine.pkl \
   --output-dir data/nyt
 ```
@@ -139,7 +164,7 @@ For English text, use `language: english` in the config and
 Run vMF Sentence LDA on the full corpus:
 
 ```bash
-poetry run spherical-sentence-topics experiments run \
+uv run spherical-sentence-topics experiments run \
   --config configs/experiments/my_corpus.example.yaml
 ```
 
@@ -163,7 +188,7 @@ encoder:
 Run vMF Sentence LDA from the 20 Newsgroups example preset:
 
 ```bash
-poetry run spherical-sentence-topics experiments run \
+uv run spherical-sentence-topics experiments run \
   --config configs/experiments/20newsgroup.example.yaml \
   --models vmf_sentence_lda \
   --iteration 0
@@ -181,7 +206,7 @@ executed model, category, topic-count, iteration, and runtime metadata.
 Run classification for one category from the same single iteration:
 
 ```bash
-poetry run spherical-sentence-topics evaluation classify \
+uv run spherical-sentence-topics evaluation classify \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -198,7 +223,7 @@ document-topic features. Classification outputs are written under
 Run topic-count diagnostics for the same run:
 
 ```bash
-poetry run spherical-sentence-topics evaluation topic-count-diagnostics \
+uv run spherical-sentence-topics evaluation topic-count-diagnostics \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -211,7 +236,7 @@ Diagnostic outputs are written under `results/topic_count_analysis/`.
 Run word-based topic metrics for the same run:
 
 ```bash
-poetry run spherical-sentence-topics evaluation word-based-metrics \
+uv run spherical-sentence-topics evaluation word-based-metrics \
   --dataset 20newsgroup \
   --category computer \
   --topic 20 \
@@ -271,24 +296,40 @@ Key internal entry points:
 
 ## Development
 
-Run formatting and lint checks:
+Code quality is checked in a fixed order: isort sorts imports, black
+formats, ruff lints, and pytest runs the tests. isort runs before black so
+that black has the final say on layout, and ruff runs on the formatted code.
+
+Before committing, apply the fixers and then run the checks in this order:
 
 ```bash
-poetry run black --check .
-poetry run isort --check-only .
-poetry run flake8 .
+uv run isort .
+uv run black .
+uv run ruff check .
+uv run pytest -q -m "not slow and not integration"
 ```
 
-Run tests:
+CI runs the same steps in the same order in check-only mode:
 
 ```bash
-poetry run pytest -q -m "not slow and not integration"
+uv run isort --check-only .
+uv run black --check .
+uv run ruff check .
+uv run pytest -q -m "not slow and not integration"
+```
+
+After changing dependencies in `pyproject.toml`, refresh both lock files so
+uv and Poetry users stay on the same versions:
+
+```bash
+uv lock
+poetry lock
 ```
 
 Run ML-dependent tests after installing the `ml` dependency group:
 
 ```bash
-poetry run pytest -q -m "slow or integration"
+uv run pytest -q -m "slow or integration"
 ```
 
 ## Citation
