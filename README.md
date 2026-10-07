@@ -1,4 +1,4 @@
-# Spherical Topic Models with Sentence Embeddings
+# vMF Sentence LDA: A Spherical Topic Model over Sentence Embeddings
 
 [![python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml/badge.svg)](https://github.com/izumi-lab/vSLDA/actions/workflows/ci.yml)
@@ -6,17 +6,17 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-Spherical Topic Models with Sentence Embeddings are a family of sentence-level
-topic models that assign topics to sentences, with each sentence represented as
-a unit-normalized embedding on the hypersphere. Each topic is modeled by a
-topic-specific von Mises–Fisher (vMF) distribution over sentence embeddings,
-while the document–topic proportions follow a Dirichlet prior, preserving the
-hierarchical structure of LDA.
+vMF Sentence LDA (vSLDA) is a sentence-level topic model that assigns topics to
+sentences, with each sentence represented as a unit-normalized embedding on the
+hypersphere. Each topic is modeled by a topic-specific von Mises–Fisher (vMF)
+distribution over sentence embeddings, while the document–topic proportions
+follow a Dirichlet prior, preserving the hierarchical structure of LDA.
 
-This repository provides a CLI-first research codebase for running reproducible
-experiments with this model family. The implemented model is referred to as
-vMF Sentence LDA (vSLDA), a compact name for comparison with baselines such as
-Gaussian LDA (GLDA) and Gaussian Sentence LDA (GSLDA).
+This repository is the official implementation of the paper
+[vMF Sentence LDA: A Spherical Topic Model over Sentence Embeddings](https://arxiv.org/abs/2610.05095).
+It provides a CLI-first research codebase for running reproducible experiments
+with vMF Sentence LDA and comparing it against baselines such as Gaussian LDA
+(GLDA) and Gaussian Sentence LDA (GSLDA).
 
 ## At a Glance
 
@@ -334,5 +334,16 @@ uv run pytest -q -m "slow or integration"
 
 ## Citation
 
-A paper describing this work is in preparation. Citation metadata will be added
-when the paper is available.
+If you use this code or model in your research, please cite the paper:
+
+```bibtex
+@misc{kobayashi2026vmfsentenceldaspherical,
+      title={vMF Sentence LDA: A Spherical Topic Model over Sentence Embeddings},
+      author={Ryotaro Kobayashi and Yuri Murayama and Kiyoshi Izumi},
+      year={2026},
+      eprint={2610.05095},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2610.05095},
+}
+```
